@@ -26,6 +26,8 @@ typedef enum {
 typedef struct {
   TokenType type; /**< Type of the token */
   char *value;    /**< String value of the token */
+  int line;       /**< 1-based line number */
+  int col;        /**< 1-based column number */
 } Token;
 
 /**
@@ -91,5 +93,13 @@ void print_token(Token token);
  * @param tokens Token array to free
  */
 void free_tokens(Token *tokens);
+
+/**
+ * @brief Returns the text of a source line for error snippets
+ * @param line 1-based line number
+ * @param out_len Receives line length without newline, may be NULL
+ * @return Pointer into the source buffer, NULL if out of range
+ */
+const char *lexer_source_line(int line, int *out_len);
 
 #endif

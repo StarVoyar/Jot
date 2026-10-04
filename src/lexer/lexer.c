@@ -1,10 +1,19 @@
 #include "lexer.h"
 
-/** Global buffer holding the source file contents */
+/** Global buffer holding the source file contents (kept for error snippets) */
 static char *global_buffer;
 
 /** Index tracking the current token position in the token array */
 size_t tokens_index = 0;
+
+/** Current source line number (1-based) */
+static int token_line = 1;
+
+/** Buffer index where the current line starts */
+static int line_start = 0;
+
+/** Column of the token being lexed (1-based) */
+static int token_col = 1;
 
 /**
  * @brief Lexes a source file into a stream of tokens
@@ -25,14 +34,21 @@ Token *Lexer(FILE *file) {
   global_buffer = (char *)buffer;
 
   int current_index = 0;
+  token_line = 1;
+  line_start = 0;
 
   Token *tokens = malloc(1024 * sizeof(Token));
 
   while (buffer[current_index] != '\0') {
 
     char character = buffer[current_index];
+    token_col = current_index - line_start + 1;
 
     if (isspace(character)) {
+      if (character == '\n') {
+        token_line++;
+        line_start = current_index + 1;
+      }
       current_index++;
     } else if (isdigit(character)) {
       Token *token = lex_int(character, &current_index);
@@ -107,12 +123,46 @@ Token *Lexer(FILE *file) {
     }
   }
 
-  free(buffer);
-
   tokens[tokens_index].value = NULL;
   tokens[tokens_index].type = END_OF_TOKENS;
+  tokens[tokens_index].line = token_line;
+  tokens[tokens_index].col = current_index - line_start + 1;
 
   return tokens;
+}
+
+/**
+ * @brief Returns the text of a source line for error snippets
+ * @param line 1-based line number
+ * @param out_len Receives line length without newline, may be NULL
+ * @return Pointer into the source buffer, NULL if out of range
+ */
+const char *lexer_source_line(int line, int *out_len) {
+  if (line < 1 || global_buffer == NULL) {
+    return NULL;
+  }
+  const char *start = global_buffer;
+  for (int i = 1; i < line; i++) {
+    start = strchr(start, '\n');
+    if (start == NULL) {
+      return NULL;
+    }
+    start++;
+  }
+  const char *end = strchr(start, '\n');
+  size_t len;
+  if (end == NULL) {
+    len = strlen(start);
+  } else {
+    len = (size_t)(end - start);
+  }
+  if (len > 0 && start[len - 1] == '\r') {
+    len--;
+  }
+  if (out_len != NULL) {
+    *out_len = (int)len;
+  }
+  return start;
 }
 
 /**
@@ -124,6 +174,8 @@ Token *Lexer(FILE *file) {
 Token *lex_int(char current_char, int *current_index) {
   Token *token = malloc(sizeof(Token));
   token->type = INT;
+  token->line = token_line;
+  token->col = token_col;
 
   char value[32];
   int value_index = 0;
@@ -152,6 +204,8 @@ Token *lex_int(char current_char, int *current_index) {
  */
 Token *lex_keyword(char current_char, int *current_index) {
   Token *token = malloc(sizeof(Token));
+  token->line = token_line;
+  token->col = token_col;
   char keyword[32];
   int keyword_index = 0;
 
@@ -193,6 +247,8 @@ Token *lex_keyword(char current_char, int *current_index) {
  */
 Token *lex_separator(char character) {
   Token *token = malloc(sizeof(Token));
+  token->line = token_line;
+  token->col = token_col;
   char separator[2] = {character, '\0'};
   token->value = malloc(2);
   memcpy(token->value, separator, 2);
@@ -208,6 +264,8 @@ Token *lex_separator(char character) {
  */
 Token *lex_operator(char character, int *current_index) {
   Token *token = malloc(sizeof(Token));
+  token->line = token_line;
+  token->col = token_col;
   char op[3] = {character, '\0', '\0'};
   (*current_index)++;
   char next_char = global_buffer[*current_index];
@@ -235,6 +293,8 @@ Token *lex_operator(char character, int *current_index) {
  */
 Token *lex_string(int *current_index) {
   Token *token = malloc(sizeof(Token));
+  token->line = token_line;
+  token->col = token_col;
   (*current_index)++;
 
   char string[256];
@@ -265,6 +325,8 @@ Token *lex_string(int *current_index) {
  */
 Token *lex_unknown(char character) {
   Token *token = malloc(sizeof(Token));
+  token->line = token_line;
+  token->col = token_col;
   char unknown[2] = {character, '\0'};
   token->value = malloc(2);
   memcpy(token->value, unknown, 2);

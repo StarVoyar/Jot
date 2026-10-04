@@ -2,6 +2,7 @@
 #define PARSER_H
 
 #include "../lexer/lexer.h"
+#include "../terminal/terminal.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -103,9 +104,10 @@ typedef struct Node {
 /**
  * @brief Parses tokens into an Abstract Syntax Tree
  * @param tokens Array of tokens to parse
+ * @param filename Source file name used in error messages
  * @return Root node of the AST (linked list of statements)
  */
-Node *Parser(Token *tokens);
+Node *Parser(Token *tokens, const char *filename);
 
 /**
  * @brief Prints the AST structure for debugging

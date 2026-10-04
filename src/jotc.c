@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  Node *ast = Parser(tokens);
+  Node *ast = Parser(tokens, argv[1]);
   if (debug) {
     print_tree(ast);
     printf("\n");

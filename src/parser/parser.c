@@ -3,6 +3,9 @@
 /** Current token being parsed */
 static Token *current_token;
 
+/** Source file name for error messages */
+static const char *source_filename;
+
 /** Forward declaration for recursive parsing */
 static Node *parse_expression();
 
@@ -20,6 +23,132 @@ static Node *parse_block_statements();
  * @return AST node for function call
  */
 static Node *parse_func_call_expr();
+
+#if defined(_MSC_VER)
+#define NORETURN __declspec(noreturn)
+#else
+#define NORETURN __attribute__((noreturn))
+#endif
+
+/**
+ * @brief Prints a diagnostic with source context (no exit)
+ * @param kind Kind label without colon (Error or Warning)
+ * @param kind_color ANSI code for the label and squiggle
+ * @param message Diagnostic message without the kind prefix
+ */
+static void print_diagnostic(const char *kind, const char *kind_color,
+                             const char *message) {
+  size_t len = strlen(message);
+  if (len > 0 && message[len - 1] == '\n') {
+    len--;
+  }
+
+  int color = terminal_setup_colors();
+  const char *mark = color ? kind_color : "";
+  const char *bold = color ? "\x1b[1m" : "";
+  const char *reset = color ? "\x1b[0m" : "";
+
+  int line = current_token->line;
+  int col = current_token->col;
+  if (line < 1) {
+    line = 1;
+  }
+  if (col < 1) {
+    col = 1;
+  }
+
+  if (current_token->type == END_OF_TOKENS) {
+    int probe_len = 0;
+    while (line > 1) {
+      const char *probe_text = lexer_source_line(line - 1, &probe_len);
+      if (probe_text == NULL) {
+        break;
+      }
+      int i = 0;
+      while (i < probe_len && (probe_text[i] == ' ' || probe_text[i] == '\t' ||
+                               probe_text[i] == '\r')) {
+        i++;
+      }
+      if (i < probe_len) {
+        line--;
+        col = probe_len + 1;
+        break;
+      }
+      line--;
+    }
+  }
+
+  fprintf(stdout, "%s%s:%s %.*s\n", mark, kind, reset, (int)len, message);
+  fprintf(stdout, "  --> %s:%d:%d\n", source_filename, line, col);
+
+  int text_len = 0;
+  const char *text = lexer_source_line(line, &text_len);
+  if (text != NULL) {
+    fprintf(stdout, "     |\n");
+    fprintf(stdout, "%4d | ", line);
+    int shown = 0;
+    for (int i = 0; i < text_len; i++) {
+      if (text[i] == '\t') {
+        int next = ((shown / 4) + 1) * 4;
+        while (shown < next) {
+          fputc(' ', stdout);
+          shown++;
+        }
+      } else {
+        fputc(text[i], stdout);
+        shown++;
+      }
+    }
+    fputc('\n', stdout);
+
+    int caret = 0;
+    for (int i = 0; i < col - 1 && i < text_len; i++) {
+      if (text[i] == '\t') {
+        caret = ((caret / 4) + 1) * 4;
+      } else {
+        caret++;
+      }
+    }
+    int width = 1;
+    if (current_token->value != NULL) {
+      width = (int)strlen(current_token->value);
+      if (width < 1) {
+        width = 1;
+      }
+    }
+    fprintf(stdout, "     | ");
+    for (int i = 0; i < caret; i++) {
+      fputc(' ', stdout);
+    }
+    if (width > 1) {
+      fprintf(stdout, "%s", mark);
+      for (int i = 0; i < width; i++) {
+        fputc('~', stdout);
+      }
+      fprintf(stdout, "%s", reset);
+    } else {
+      fprintf(stdout, "%s^%s", bold, reset);
+    }
+    fputc('\n', stdout);
+  }
+}
+
+/**
+ * @brief Prints a clang-style error with source context and exits
+ * @param message Error message without the Error: prefix
+ */
+static NORETURN void parse_error(const char *message) {
+  print_diagnostic("Error", "\x1b[1;31m", message);
+  exit(1);
+}
+
+/**
+ * @brief Prints a gcc-style warning with source context
+ * @param message Warning message without the Warning: prefix
+ */
+static void parse_warning(const char *message) {
+  print_diagnostic("Warning", "\x1b[1;33m", message);
+}
 
 /**
  * @brief Creates a new AST node
@@ -87,8 +216,7 @@ static Node *parse_func_call_expr() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after function name\n");
-    exit(1);
+    parse_error("Expected '(' after function name\n");
   }
   current_token++;
 
@@ -117,8 +245,7 @@ static Node *parse_func_call_expr() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after function call\n");
-    exit(1);
+    parse_error("Expected ')' after function call\n");
   }
   current_token++;
 
@@ -132,8 +259,7 @@ static Node *parse_func_call_expr() {
  */
 static Node *parse_primary() {
   if (current_token->type == END_OF_TOKENS) {
-    printf("Error: Unexpected end of input in expression\n");
-    exit(1);
+    parse_error("Unexpected end of input in expression\n");
   }
   if (current_token->type == INT) {
     return parse_int_literal();
@@ -150,8 +276,7 @@ static Node *parse_primary() {
     Node *expr = parse_expression();
     if (current_token->type == END_OF_TOKENS ||
         strcmp(current_token->value, ")") != 0) {
-      printf("Error: Expected closing parenthesis\n");
-      exit(1);
+      parse_error("Expected closing parenthesis\n");
     }
     current_token++;
     return expr;
@@ -184,14 +309,12 @@ static Node *parse_primary() {
 
     if (current_token->type == END_OF_TOKENS ||
         strcmp(current_token->value, "]") != 0) {
-      printf("Error: Expected ']' after array literal\n");
-      exit(1);
+      parse_error("Expected ']' after array literal\n");
     }
     current_token++;
     return node;
   }
-  printf("Error: Unexpected token in expression\n");
-  exit(1);
+  parse_error("Unexpected token in expression\n");
 }
 
 /**
@@ -227,8 +350,7 @@ static Node *parse_return() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after return\n");
-    exit(1);
+    parse_error("Expected '(' after return\n");
   }
   current_token++;
 
@@ -236,15 +358,13 @@ static Node *parse_return() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after return value\n");
-    exit(1);
+    parse_error("Expected ')' after return value\n");
   }
   current_token++;
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    printf("Error: Expected ';' after return statement\n");
-    exit(1);
+    parse_error("Expected ';' after return statement\n");
   }
   current_token++;
 
@@ -264,8 +384,7 @@ static Node *parse_var_decl() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    printf("Error: Expected identifier after type\n");
-    exit(1);
+    parse_error("Expected identifier after type\n");
   }
   len = strlen(current_token->value);
   node->var_decl.name = malloc(len + 1);
@@ -283,8 +402,7 @@ static Node *parse_var_decl() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    printf("Error: Expected ';' after variable declaration\n");
-    exit(1);
+    parse_error("Expected ';' after variable declaration\n");
   }
   current_token++;
 
@@ -305,8 +423,7 @@ static Node *parse_assignment() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "=") != 0) {
-    printf("Error: Expected '=' after identifier\n");
-    exit(1);
+    parse_error("Expected '=' after identifier\n");
   }
   current_token++;
 
@@ -314,8 +431,7 @@ static Node *parse_assignment() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    printf("Error: Expected ';' after assignment\n");
-    exit(1);
+    parse_error("Expected ';' after assignment\n");
   }
   current_token++;
 
@@ -333,6 +449,9 @@ static Node *parse_block_statements() {
   while (current_token->type != END_OF_TOKENS &&
          (current_token->value == NULL ||
           strcmp(current_token->value, "}") != 0)) {
+    if (tail != NULL && tail->type == NODE_RETURN) {
+      parse_warning("Unreachable code after return");
+    }
     Node *stmt = parse_statement();
     if (head == NULL) {
       head = stmt;
@@ -356,8 +475,7 @@ static Node *parse_print() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after print\n");
-    exit(1);
+    parse_error("Expected '(' after print\n");
   }
   current_token++;
 
@@ -365,15 +483,13 @@ static Node *parse_print() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after print value\n");
-    exit(1);
+    parse_error("Expected ')' after print value\n");
   }
   current_token++;
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    printf("Error: Expected ';' after print statement\n");
-    exit(1);
+    parse_error("Expected ';' after print statement\n");
   }
   current_token++;
 
@@ -389,30 +505,26 @@ static Node *parse_if() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after if\n");
-    exit(1);
+    parse_error("Expected '(' after if\n");
   }
   current_token++;
 
   node->if_stmt.condition = parse_expression();
 
   if (strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after if condition\n");
-    exit(1);
+    parse_error("Expected ')' after if condition\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    printf("Error: Expected '{' after if condition\n");
-    exit(1);
+    parse_error("Expected '{' after if condition\n");
   }
   current_token++;
 
   node->if_stmt.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    printf("Error: Expected '}' after if body\n");
-    exit(1);
+    parse_error("Expected '}' after if body\n");
   }
   current_token++;
 
@@ -424,14 +536,12 @@ static Node *parse_if() {
       node->if_stmt.else_body = parse_if();
     } else {
       if (strcmp(current_token->value, "{") != 0) {
-        printf("Error: Expected '{' after else\n");
-        exit(1);
+        parse_error("Expected '{' after else\n");
       }
       current_token++;
       node->if_stmt.else_body = parse_block_statements();
       if (strcmp(current_token->value, "}") != 0) {
-        printf("Error: Expected '}' after else body\n");
-        exit(1);
+        parse_error("Expected '}' after else body\n");
       }
       current_token++;
     }
@@ -451,30 +561,26 @@ static Node *parse_while() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after while\n");
-    exit(1);
+    parse_error("Expected '(' after while\n");
   }
   current_token++;
 
   node->while_stmt.condition = parse_expression();
 
   if (strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after while condition\n");
-    exit(1);
+    parse_error("Expected ')' after while condition\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    printf("Error: Expected '{' after while condition\n");
-    exit(1);
+    parse_error("Expected '{' after while condition\n");
   }
   current_token++;
 
   node->while_stmt.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    printf("Error: Expected '}' after while body\n");
-    exit(1);
+    parse_error("Expected '}' after while body\n");
   }
   current_token++;
 
@@ -490,14 +596,12 @@ static Node *parse_for() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after for\n");
-    exit(1);
+    parse_error("Expected '(' after for\n");
   }
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    printf("Error: Expected identifier in for loop\n");
-    exit(1);
+    parse_error("Expected identifier in for loop\n");
   }
   size_t len = strlen(current_token->value);
   node->for_stmt.var_name = malloc(len + 1);
@@ -506,14 +610,12 @@ static Node *parse_for() {
   current_token++;
 
   if (strcmp(current_token->value, "in") != 0) {
-    printf("Error: Expected 'in' in for loop\n");
-    exit(1);
+    parse_error("Expected 'in' in for loop\n");
   }
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    printf("Error: Expected array identifier in for loop\n");
-    exit(1);
+    parse_error("Expected array identifier in for loop\n");
   }
   len = strlen(current_token->value);
   node->for_stmt.array_name = malloc(len + 1);
@@ -522,22 +624,19 @@ static Node *parse_for() {
   current_token++;
 
   if (strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after for loop declaration\n");
-    exit(1);
+    parse_error("Expected ')' after for loop declaration\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    printf("Error: Expected '{' after for loop\n");
-    exit(1);
+    parse_error("Expected '{' after for loop\n");
   }
   current_token++;
 
   node->for_stmt.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    printf("Error: Expected '}' after for body\n");
-    exit(1);
+    parse_error("Expected '}' after for body\n");
   }
   current_token++;
 
@@ -553,8 +652,7 @@ static Node *parse_array_decl() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    printf("Error: Expected identifier after array\n");
-    exit(1);
+    parse_error("Expected identifier after array\n");
   }
   size_t len = strlen(current_token->value);
   node->array_decl.name = malloc(len + 1);
@@ -563,14 +661,12 @@ static Node *parse_array_decl() {
   current_token++;
 
   if (strcmp(current_token->value, "=") != 0) {
-    printf("Error: Expected '=' after array name\n");
-    exit(1);
+    parse_error("Expected '=' after array name\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "[") != 0) {
-    printf("Error: Expected '[' for array literal\n");
-    exit(1);
+    parse_error("Expected '[' for array literal\n");
   }
   current_token++;
 
@@ -599,14 +695,12 @@ static Node *parse_array_decl() {
   }
 
   if (strcmp(current_token->value, "]") != 0) {
-    printf("Error: Expected ']' after array elements\n");
-    exit(1);
+    parse_error("Expected ']' after array elements\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, ";") != 0) {
-    printf("Error: Expected ';' after array declaration\n");
-    exit(1);
+    parse_error("Expected ';' after array declaration\n");
   }
   current_token++;
 
@@ -622,8 +716,7 @@ static Node *parse_function() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    printf("Error: Expected function name\n");
-    exit(1);
+    parse_error("Expected function name\n");
   }
   size_t len = strlen(current_token->value);
   node->function.name = malloc(len + 1);
@@ -632,8 +725,7 @@ static Node *parse_function() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    printf("Error: Expected '(' after function name\n");
-    exit(1);
+    parse_error("Expected '(' after function name\n");
   }
   current_token++;
 
@@ -657,8 +749,7 @@ static Node *parse_function() {
         param->var_decl.var_type[len] = '\0';
         current_token++;
         if (current_token->type != IDENTIFIER) {
-          printf("Error: Expected identifier after type in parameter list\n");
-          exit(1);
+          parse_error("Expected identifier after type in parameter list\n");
         }
         len = strlen(current_token->value);
         param->var_decl.name = malloc(len + 1);
@@ -674,8 +765,7 @@ static Node *parse_function() {
         param->identifier.name[len] = '\0';
         current_token++;
       } else {
-        printf("Error: Expected parameter in function definition\n");
-        exit(1);
+        parse_error("Expected parameter in function definition\n");
       }
 
       if (node->function.params == NULL) {
@@ -696,22 +786,19 @@ static Node *parse_function() {
   }
 
   if (strcmp(current_token->value, ")") != 0) {
-    printf("Error: Expected ')' after function parameters\n");
-    exit(1);
+    parse_error("Expected ')' after function parameters\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    printf("Error: Expected '{' after function declaration\n");
-    exit(1);
+    parse_error("Expected '{' after function declaration\n");
   }
   current_token++;
 
   node->function.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    printf("Error: Expected '}' after function body\n");
-    exit(1);
+    parse_error("Expected '}' after function body\n");
   }
   current_token++;
 
@@ -750,8 +837,7 @@ static Node *parse_statement() {
       Node *call = parse_func_call_expr();
       if (current_token->type == END_OF_TOKENS ||
           strcmp(current_token->value, ";") != 0) {
-        printf("Error: Expected ';' after function call\n");
-        exit(1);
+        parse_error("Expected ';' after function call\n");
       }
       current_token++;
       return call;
@@ -760,17 +846,20 @@ static Node *parse_statement() {
       return parse_assignment();
     }
   }
-  printf("Error: Unexpected token in statement\n");
-  exit(1);
+  parse_error("Unexpected token in statement\n");
 }
 
-Node *Parser(Token *tokens) {
+Node *Parser(Token *tokens, const char *filename) {
+  source_filename = filename;
   current_token = tokens;
 
   Node *statements = NULL;
   Node *current = NULL;
 
   while (current_token->type != END_OF_TOKENS) {
+    if (current != NULL && current->type == NODE_RETURN) {
+      parse_warning("Unreachable code after return");
+    }
     Node *stmt = parse_statement();
 
     if (statements == NULL) {
