@@ -2,6 +2,7 @@ SRC_DIR = src
 BUILD_DIR = build
 BIN_DIR = build/bin
 INT_DIR = build/int
+GENERATED_DIR = build/bin/generated
 CC = gcc
 CFLAGS = -Wall -Wextra
 INPUT_FILE = test/test.jot
@@ -54,16 +55,16 @@ build:
 	@$(DEL_OBJS)
 	$(MAKE) $(OBJS)
 
-link: | $(BIN_DIR)
+link: | $(BIN_DIR) $(GENERATED_DIR)
 	@$(DEL_TARGET)
 	$(CC) $(CFLAGS) $(OBJS) -o $(TARGET)
 
-run:
+run: | $(GENERATED_DIR)
 	@$(RUN_CMD) $(INPUT_FILE)
 
 $(OBJS): | $(OBJ_DIRS)
 
-$(OBJ_DIRS) $(BIN_DIR):
+$(OBJ_DIRS) $(BIN_DIR) $(GENERATED_DIR):
 	@$(call MKDIR,$@)
 
 $(INT_DIR)/%.o: $(SRC_DIR)/%.c
