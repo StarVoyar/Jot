@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "lexer/lexer.h"
+#include "parser/parser.h"
 
 #include <stdio.h>
 
@@ -22,6 +23,10 @@ int main(int argc, char *argv[]) {
   for (size_t i = 0; tokens[i].type != END_OF_TOKENS; i++) {
     print_token(tokens[i]);
   }
+
+  Node *ast = Parser(tokens);
+  print_tree(ast);
+  printf("\n");
 
   return 0;
 }

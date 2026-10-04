@@ -26,30 +26,6 @@ Token *Lexer(FILE *file) {
 
     if (isspace(character)) {
       current_index++;
-    } else if (character == ';') {
-      Token *token = malloc(sizeof(Token));
-      token->value = ";";
-      token->type = SEPARATOR;
-      tokens[tokens_index] = *token;
-      tokens_index++;
-      current_index++;
-      free(token);
-    } else if (character == '(') {
-      Token *token = malloc(sizeof(Token));
-      token->value = "(";
-      token->type = SEPARATOR;
-      tokens[tokens_index] = *token;
-      tokens_index++;
-      current_index++;
-      free(token);
-    } else if (character == ')') {
-      Token *token = malloc(sizeof(Token));
-      token->value = ")";
-      token->type = SEPARATOR;
-      tokens[tokens_index] = *token;
-      tokens_index++;
-      current_index++;
-      free(token);
     } else if (isdigit(character)) {
       Token *token = lex_int(character, &current_index);
       tokens[tokens_index] = *token;
@@ -61,7 +37,52 @@ Token *Lexer(FILE *file) {
       tokens_index++;
       free(token);
     } else {
-      current_index++;
+      switch (character) {
+      case ';':
+      case '(':
+      case ')':
+      case '{':
+      case '}':
+      case '[':
+      case ']':
+      case ',': {
+        Token *token = lex_separator(character);
+        tokens[tokens_index] = *token;
+        tokens_index++;
+        current_index++;
+        free(token);
+        break;
+      }
+      case '+':
+      case '-':
+      case '*':
+      case '/':
+      case '=':
+      case '!':
+      case '<':
+      case '>': {
+        Token *token = lex_operator(character, &current_index);
+        tokens[tokens_index] = *token;
+        tokens_index++;
+        free(token);
+        break;
+      }
+      case '"': {
+        Token *token = lex_string(&current_index);
+        tokens[tokens_index] = *token;
+        tokens_index++;
+        free(token);
+        break;
+      }
+      default: {
+        Token *token = lex_unknown(character);
+        tokens[tokens_index] = *token;
+        tokens_index++;
+        current_index++;
+        free(token);
+        break;
+      }
+      }
     }
   }
 
@@ -71,25 +92,6 @@ Token *Lexer(FILE *file) {
   tokens[tokens_index].type = END_OF_TOKENS;
 
   return tokens;
-}
-
-void print_token(Token token) {
-  printf("Token Value: ");
-  for (int i = 0; token.value[i] != '\0'; i++) {
-    printf("%c", token.value[i]);
-  }
-  if (token.type == INT) {
-    printf(", Token Type: INT \n");
-  }
-  if (token.type == KEYWORD) {
-    printf(", Token Type: KEYWORD \n");
-  }
-  if (token.type == SEPARATOR) {
-    printf(", Token Type: SEPARATOR \n");
-  }
-  if (token.type == UNKNOWN) {
-    printf(", Token Type: UNKNOWN \n");
-  }
 }
 
 Token *lex_int(char current_char, int *current_index) {
@@ -120,7 +122,7 @@ Token *lex_keyword(char current_char, int *current_index) {
   char keyword[32];
   int keyword_index = 0;
 
-  while (isalpha(current_char) && current_char != '\0' && keyword_index < 31) {
+  while ((isalpha(current_char) || current_char == '_') && current_char != '\0' && keyword_index < 31) {
     keyword[keyword_index++] = current_char;
     (*current_index)++;
     current_char = global_buffer[*current_index];
@@ -128,15 +130,124 @@ Token *lex_keyword(char current_char, int *current_index) {
 
   keyword[keyword_index] = '\0';
 
-  if (strcmp(keyword, "return") == 0) {
+  if (strcmp(keyword, "return") == 0 || strcmp(keyword, "if") == 0 ||
+      strcmp(keyword, "else") == 0 || strcmp(keyword, "while") == 0 ||
+      strcmp(keyword, "for") == 0 || strcmp(keyword, "fn") == 0 ||
+      strcmp(keyword, "print") == 0 || strcmp(keyword, "int") == 0 ||
+      strcmp(keyword, "bool") == 0 || strcmp(keyword, "string") == 0 ||
+      strcmp(keyword, "char") == 0 || strcmp(keyword, "array") == 0) {
     token->type = KEYWORD;
-    token->value = "RETURN";
+    size_t len = strlen(keyword);
+    token->value = malloc(len + 1);
+    memcpy(token->value, keyword, len);
+    token->value[len] = '\0';
   } else {
-    token->type = UNKNOWN;
-    token->value = "UNKNOWN";
+    token->type = IDENTIFIER;
+    size_t len = strlen(keyword);
+    token->value = malloc(len + 1);
+    memcpy(token->value, keyword, len);
+    token->value[len] = '\0';
   }
 
   return token;
+}
+
+Token *lex_separator(char character) {
+  Token *token = malloc(sizeof(Token));
+  char separator[2] = {character, '\0'};
+  token->value = malloc(2);
+  memcpy(token->value, separator, 2);
+  token->type = SEPARATOR;
+  return token;
+}
+
+Token *lex_operator(char character, int *current_index) {
+  Token *token = malloc(sizeof(Token));
+  char op[3] = {character, '\0', '\0'};
+  (*current_index)++;
+  char next_char = global_buffer[*current_index];
+
+  if ((character == '=' && next_char == '=') || (character == '!' && next_char == '=') ||
+      (character == '<' && next_char == '=') || (character == '>' && next_char == '=')) {
+    op[1] = next_char;
+    (*current_index)++;
+  }
+
+  size_t len = strlen(op);
+  token->value = malloc(len + 1);
+  memcpy(token->value, op, len);
+  token->value[len] = '\0';
+  token->type = OPERATOR;
+  return token;
+}
+
+Token *lex_string(int *current_index) {
+  Token *token = malloc(sizeof(Token));
+  (*current_index)++;
+
+  char string[256];
+  int string_index = 0;
+  char current_char = global_buffer[*current_index];
+
+  while (current_char != '"' && current_char != '\0' && string_index < 255) {
+    string[string_index++] = current_char;
+    (*current_index)++;
+    current_char = global_buffer[*current_index];
+  }
+
+  (*current_index)++;
+  string[string_index] = '\0';
+
+  size_t len = strlen(string);
+  token->value = malloc(len + 1);
+  memcpy(token->value, string, len);
+  token->value[len] = '\0';
+  token->type = STRING;
+  return token;
+}
+
+Token *lex_unknown(char character) {
+  Token *token = malloc(sizeof(Token));
+  char unknown[2] = {character, '\0'};
+  token->value = malloc(2);
+  memcpy(token->value, unknown, 2);
+  token->type = UNKNOWN;
+  return token;
+}
+
+void print_token(Token token) {
+  printf("Token Value: ");
+  printf("'");
+  for (int i = 0; token.value[i] != '\0'; i++) {
+    printf("%c", token.value[i]);
+  }
+  printf("'");
+
+  switch (token.type) {
+  case INT:
+    printf(", Token Type: INT \n");
+    break;
+  case IDENTIFIER:
+    printf(", Token Type: IDENTIFIER \n");
+    break;
+  case KEYWORD:
+    printf(", Token Type: KEYWORD \n");
+    break;
+  case OPERATOR:
+    printf(", Token Type: OPERATOR \n");
+    break;
+  case STRING:
+    printf(", Token Type: STRING \n");
+    break;
+  case SEPARATOR:
+    printf(", Token Type: SEPARATOR \n");
+    break;
+  case UNKNOWN:
+    printf(", Token Type: UNKNOWN \n");
+    break;
+  default:
+    break;
+  }
 }
 
 void free_tokens(Token *tokens) {
@@ -147,7 +258,11 @@ void free_tokens(Token *tokens) {
     if (tokens[i].type == END_OF_TOKENS) {
       break;
     }
-    if (tokens[i].value != NULL && tokens[i].type == INT) {
+    if (tokens[i].value != NULL &&
+        (tokens[i].type == INT || tokens[i].type == IDENTIFIER ||
+         tokens[i].type == KEYWORD || tokens[i].type == OPERATOR ||
+         tokens[i].type == STRING || tokens[i].type == SEPARATOR ||
+         tokens[i].type == UNKNOWN)) {
       free(tokens[i].value);
     }
   }

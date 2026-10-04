@@ -4,13 +4,18 @@ A compiled programming language written in C.
 
 ## Current Status
 
-Jot is in early development. Currently implements a lexer that tokenizes source code.
+Jot is in early development. Currently implements a lexer that tokenizes source code and a parser that builds an abstract syntax tree (AST).
 
-## Features
+## Language Features
 
-- **Keywords**: `return`
-- **Literals**: Integer literals
-- **Separators**: Semicolons, parentheses
+- **Keywords**: `fn`, `return`, `if`, `else`, `while`, `for`, `print`, `int`, `bool`, `string`, `char`, `array`
+- **Literals**: Integer literals, string literals
+- **Operators**: Arithmetic (`+`, `-`, `*`, `/`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), assignment (`=`)
+- **Separators**: Semicolons, parentheses, braces, brackets, commas
+- **Control Flow**: if/else statements, while loops, for loops
+- **Data Types**: int, bool, string, char, array
+- **Functions**: Function definitions and calls
+- **Comments**: Single-line comments (`//`)
 
 ## Building
 
