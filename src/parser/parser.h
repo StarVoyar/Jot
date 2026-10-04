@@ -42,7 +42,8 @@ typedef struct Node {
   int width;          /**< Source width for squiggles, at least 1 */
   union {
     struct {
-      char *name; /**< Function name */
+      char *name;    /**< Function name */
+      int is_public; /**< Non-zero if declared public (importable) */
       struct Node
           *params; /**< Function parameters (linked via right, NULL if none) */
       struct Node *body; /**< Function body (linked via right, NULL if empty) */

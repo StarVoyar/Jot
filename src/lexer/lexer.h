@@ -102,4 +102,23 @@ void free_tokens(Token *tokens);
  */
 const char *lexer_source_line(int line, int *out_len);
 
+/**
+ * @brief Snapshot of lexer state for nested file parsing
+ */
+typedef struct {
+  char *buffer; /**< Source buffer (each Lexer call owns its token array) */
+} LexerSnapshot;
+
+/**
+ * @brief Saves the source buffer before parsing an imported file
+ * @param snapshot Receives the current state
+ */
+void lexer_save(LexerSnapshot *snapshot);
+
+/**
+ * @brief Restores the source buffer after parsing an imported file
+ * @param snapshot State to restore
+ */
+void lexer_restore(const LexerSnapshot *snapshot);
+
 #endif

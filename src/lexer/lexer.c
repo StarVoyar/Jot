@@ -34,10 +34,11 @@ Token *Lexer(FILE *file) {
   global_buffer = (char *)buffer;
 
   int current_index = 0;
+  tokens_index = 0;
   token_line = 1;
   line_start = 0;
 
-  Token *tokens = malloc(1024 * sizeof(Token));
+  Token *tokens = malloc(65536 * sizeof(Token));
 
   while (buffer[current_index] != '\0') {
 
@@ -95,6 +96,7 @@ Token *Lexer(FILE *file) {
       case '+':
       case '-':
       case '*':
+      case '%':
       case '=':
       case '!':
       case '<':
@@ -164,6 +166,20 @@ const char *lexer_source_line(int line, int *out_len) {
     *out_len = (int)len;
   }
   return start;
+}
+
+/**
+ * @brief Saves the source buffer before parsing an imported file
+ * @param snapshot Receives the current state
+ */
+void lexer_save(LexerSnapshot *snapshot) { snapshot->buffer = global_buffer; }
+
+/**
+ * @brief Restores the source buffer after parsing an imported file
+ * @param snapshot State to restore
+ */
+void lexer_restore(const LexerSnapshot *snapshot) {
+  global_buffer = snapshot->buffer;
 }
 
 /**

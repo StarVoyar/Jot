@@ -14,8 +14,10 @@ Working end-to-end compiler: lexer (tokens) → parser (AST) → codegen (`.asm`
 - **Separators**: Semicolons, parentheses, braces, brackets, commas
 - **Control Flow**: if/else statements (plus else-if), while loops
 - **Data Types**: int, bool, string, char (arrays parse but codegen rejects them for now, same for `for` loops)
-- **Functions**: Definitions with typed or untyped params (any count: first four use registers, the rest spill to the stack). Nothing runs until called — top-level statements are the entry point, `fn main` is an ordinary function invoked with `main();`. Inside a body, parameters are read as `self.name` (bare parameter names are rejected); locals stay bare
+- **Functions**: Definitions with typed or untyped params (any count: first four use registers, the rest spill to the stack). Nothing runs until called — top-level statements are the entry point, `fn main` is an ordinary function invoked with `main();`. Inside a body, parameters are read as `self.name` (bare parameter names are rejected); locals stay bare. Duplicate params, calls to undefined functions, and arity mismatches are errors with locations
 - **Member access**: `self.arg` for parameters (also inside `{...}` print interpolation). Other objects and member assignment are not supported
+- **Visibility**: `fn public name` / `fn private name`. Missing visibility warns and defaults to private (`main` defaults to public). Only public functions can be imported
+- **Imports**: `from [file.jot] import [a, b];` merges the file's functions (paths resolve from where `jotc` runs). `import [*]` takes all public functions; names alongside `*` warn as redundant. Dependencies travel with imports (a merged function pulls what it calls, including private helpers). Re-imports resolve once (diamonds safe); cycles, duplicates, private or missing names are errors, and non-function top-level statements in imported files are ignored. Empty lists warn; `import` without `from` is an error
 - **Print**: `print(x);` for values, `print("x={x}\n");` with `{name}` interpolation
 - **Return**: `return(v);` returns from a function (`rax`), top-level `return(v);` exits the process with code `v`
 - **Comments**: Single-line comments (`//`)
@@ -82,6 +84,29 @@ add(10, 20);
 ```
 
 prints `Sum: 30`.
+
+Splitting across files (`math.jot`):
+
+```jot
+fn public add(int var1, int var2) {
+  int sum = self.var1 + self.var2;
+  return(sum);
+}
+```
+
+```jot
+from [math.jot] import [add];
+
+fn public main() {
+  int r = add(20, 22);
+  print("{r}\n");
+  return(0);
+}
+
+main();
+```
+
+prints `42`.
 
 ## Implementation
 

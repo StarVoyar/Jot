@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "parser.h"
 
 /** Current token being parsed */
@@ -5,6 +7,30 @@ static Token *current_token;
 
 /** Source file name for error messages */
 static const char *source_filename;
+
+/** First top level statement (functions merge here from imports) */
+static Node *program_head;
+
+/** Last top level statement */
+static Node *program_tail;
+
+/** Maximum nested import depth */
+#define MAX_IMPORT_DEPTH 64
+
+/** Files currently being parsed (cycle detection, borrowed pointers) */
+static const char *import_stack[MAX_IMPORT_DEPTH];
+
+/** Nested import depth */
+static int import_depth;
+
+/** Already imported files (borrowed pointers owned by the done list) */
+static const char *import_done[MAX_IMPORT_DEPTH];
+
+/** Parsed roots of completed imports, parallel to import_done */
+static Node *import_roots[MAX_IMPORT_DEPTH];
+
+/** Number of completed imports */
+static int import_done_count;
 
 /** Forward declaration for recursive parsing */
 static Node *parse_expression();
@@ -23,6 +49,227 @@ static Node *parse_block_statements();
  * @return AST node for function call
  */
 static Node *parse_func_call_expr();
+
+/** Forward declaration for import parsing */
+static Node *parse_import();
+
+/** Forward declaration for error reporting */
+static NORETURN void parse_error(const char *message);
+
+/**
+ * @brief Appends a statement to the program list
+ * @param stmt Statement node to append, NULL is ignored
+ */
+static void emit_statement(Node *stmt) {
+  if (stmt == NULL) {
+    return;
+  }
+  if (program_head == NULL) {
+    program_head = stmt;
+    program_tail = stmt;
+  } else {
+    program_tail->right = stmt;
+    program_tail = stmt;
+  }
+}
+
+/**
+ * @brief Pushes a file onto the import stack
+ * @param filename File being parsed
+ */
+static void push_import(const char *filename) {
+  if (import_depth >= MAX_IMPORT_DEPTH) {
+    parse_error("Import depth exceeded\n");
+  }
+  import_stack[import_depth] = filename;
+  import_depth++;
+}
+
+/**
+ * @brief Pops a file off the import stack
+ */
+static void pop_import() { import_depth--; }
+
+/**
+ * @brief Checks if a file is already being parsed
+ * @param path File path to look up
+ * @return Non-zero if the file is on the import stack
+ */
+static int import_in_progress(const char *path) {
+  for (int i = 0; i < import_depth; i++) {
+    if (strcmp(import_stack[i], path) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * @brief Checks if a file was already imported
+ * @param path File path to look up
+ * @return Non-zero if the file is fully imported
+ */
+static int import_is_done(const char *path) {
+  for (int i = 0; i < import_done_count; i++) {
+    if (strcmp(import_done[i], path) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * @brief Prints an error at an explicit position and exits
+ * @param line 1-based line number
+ * @param col 1-based column number
+ * @param width Squiggle width, at least 1
+ * @param message Error message without the Error: prefix
+ */
+static NORETURN void parse_error_at(int line, int col, int width,
+                                    const char *message) {
+  term_report(TERM_ERROR, source_filename, line, col, width, message);
+  exit(1);
+}
+
+/**
+ * @brief Prints a warning at an explicit position
+ * @param line 1-based line number
+ * @param col 1-based column number
+ * @param width Squiggle width, at least 1
+ * @param message Warning message without the Warning: prefix
+ */
+static void parse_warning_at(int line, int col, int width,
+                             const char *message) {
+  term_report(TERM_WARNING, source_filename, line, col, width, message);
+}
+
+/**
+ * @brief Display width of a raw column range with tab expansion
+ * @param line 1-based line number
+ * @param from_col 1-based start column, inclusive
+ * @param to_col 1-based end column, exclusive
+ * @return Display width, at least 1
+ */
+static int display_span(int line, int from_col, int to_col) {
+  int text_len = 0;
+  const char *text = lexer_source_line(line, &text_len);
+  if (text == NULL || to_col <= from_col) {
+    return 1;
+  }
+  int start = 0;
+  for (int i = 0; i < from_col - 1 && i < text_len; i++) {
+    if (text[i] == '\t') {
+      start = ((start / 4) + 1) * 4;
+    } else {
+      start++;
+    }
+  }
+  int end = start;
+  for (int i = from_col - 1; i < to_col - 1 && i < text_len; i++) {
+    if (text[i] == '\t') {
+      end = ((end / 4) + 1) * 4;
+    } else {
+      end++;
+    }
+  }
+  if (end <= start) {
+    return 1;
+  }
+  return end - start;
+}
+/**
+ * @brief Finds a defined function by name
+ * @param root List to search
+ * @param name Function name to find
+ * @return Function node or NULL
+ */
+static Node *find_function_in(Node *root, const char *name) {
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_FUNCTION && strcmp(s->function.name, name) == 0) {
+      return s;
+    }
+  }
+  return NULL;
+}
+
+/**
+ * @brief Errors if a function name is already defined
+ * @param name Function name to check
+ * @param line Position line for the error
+ * @param col Position column for the error
+ * @param width Squiggle width for the error
+ */
+static void check_duplicate_fn(const char *name, int line, int col, int width) {
+  if (find_function_in(program_head, name) != NULL) {
+    char message[96];
+    snprintf(message, sizeof(message), "Function '%s' is already defined",
+             name);
+    parse_error_at(line, col, width, message);
+  }
+}
+
+/**
+ * @brief Gathers call nodes in a subtree
+ * @param node Subtree root (follows right chains)
+ * @param out_calls Found call nodes, may repeat
+ * @param out_count Number found so far, updated
+ * @param cap Capacity of out_calls
+ */
+static void collect_calls(Node *node, Node **out_calls, int *out_count,
+                          int cap) {
+  for (Node *s = node; s != NULL; s = s->right) {
+    if (s->type == NODE_FUNC_CALL) {
+      if (*out_count < cap) {
+        out_calls[*out_count] = s;
+        (*out_count)++;
+      }
+    }
+    switch (s->type) {
+    case NODE_FUNCTION:
+      collect_calls(s->function.body, out_calls, out_count, cap);
+      break;
+    case NODE_VAR_DECL:
+      collect_calls(s->var_decl.value, out_calls, out_count, cap);
+      break;
+    case NODE_ARRAY_DECL:
+      collect_calls(s->array_decl.elements, out_calls, out_count, cap);
+      break;
+    case NODE_IF:
+      collect_calls(s->if_stmt.condition, out_calls, out_count, cap);
+      collect_calls(s->if_stmt.body, out_calls, out_count, cap);
+      collect_calls(s->if_stmt.else_body, out_calls, out_count, cap);
+      break;
+    case NODE_WHILE:
+      collect_calls(s->while_stmt.condition, out_calls, out_count, cap);
+      collect_calls(s->while_stmt.body, out_calls, out_count, cap);
+      break;
+    case NODE_FOR:
+      collect_calls(s->for_stmt.body, out_calls, out_count, cap);
+      break;
+    case NODE_PRINT:
+      collect_calls(s->print_stmt.value, out_calls, out_count, cap);
+      break;
+    case NODE_RETURN:
+      collect_calls(s->return_stmt.value, out_calls, out_count, cap);
+      break;
+    case NODE_BINARY_OP:
+      collect_calls(s->binary_op.left, out_calls, out_count, cap);
+      collect_calls(s->binary_op.right, out_calls, out_count, cap);
+      break;
+    case NODE_FUNC_CALL:
+      collect_calls(s->func_call.args, out_calls, out_count, cap);
+      break;
+    case NODE_ASSIGNMENT:
+      collect_calls(s->assignment.value, out_calls, out_count, cap);
+      break;
+    case NODE_ARRAY_LITERAL:
+      collect_calls(s->array_literal.elements, out_calls, out_count, cap);
+      break;
+    default:
+      break;
+    }
+  }
+}
 
 /**
  * @brief Width of the current token for squiggles
@@ -167,10 +414,19 @@ static int line_rest_width(int line, int col) {
 }
 
 /**
- * @brief Prints a gcc-style warning spanning the rest of the line
+ * @brief Prints a gcc-style warning with source context
  * @param message Warning message without the Warning: prefix
  */
 static void parse_warning(const char *message) {
+  term_report(TERM_WARNING, source_filename, current_token->line,
+              current_token->col, token_width(), message);
+}
+
+/**
+ * @brief Prints a gcc-style warning spanning the rest of the line
+ * @param message Warning message without the Warning: prefix
+ */
+static void parse_warning_line(const char *message) {
   term_report(
       TERM_WARNING, source_filename, current_token->line, current_token->col,
       line_rest_width(current_token->line, current_token->col), message);
@@ -379,6 +635,16 @@ static Node *parse_primary() {
     current_token++;
     return node;
   }
+  if (current_token->value != NULL && strcmp(current_token->value, "{") == 0) {
+    parse_error(
+        "Unexpected '{' in expression ('{...}' only works inside strings)\n");
+  }
+  if (current_token->value != NULL) {
+    char message[96];
+    snprintf(message, sizeof(message), "Unexpected '%s' in expression",
+             current_token->value);
+    parse_error(message);
+  }
   parse_error("Unexpected token in expression\n");
 }
 
@@ -515,7 +781,7 @@ static Node *parse_block_statements() {
          (current_token->value == NULL ||
           strcmp(current_token->value, "}") != 0)) {
     if (tail != NULL && tail->type == NODE_RETURN) {
-      parse_warning("Unreachable code after return");
+      parse_warning_line("Unreachable code after return");
     }
     Node *stmt = parse_statement();
     if (head == NULL) {
@@ -773,12 +1039,383 @@ static Node *parse_array_decl() {
 }
 
 /**
+ * @brief Deep-copies a right-linked node list for import merging
+ * @param head First node of the list, may be NULL
+ * @return Fresh list with no links into the original
+ */
+static Node *clone_list(Node *head);
+
+/**
+ * @brief Deep-copies an AST subtree for import merging
+ * @param node Subtree root, sibling chain is not copied
+ * @return Fresh copy with right set to NULL
+ */
+static Node *clone_node(Node *node) {
+  if (node == NULL) {
+    return NULL;
+  }
+  Node *copy = malloc(sizeof(Node));
+  copy->type = node->type;
+  copy->left = NULL;
+  copy->right = NULL;
+  copy->line = node->line;
+  copy->col = node->col;
+  copy->width = node->width;
+  size_t len = 0;
+  switch (node->type) {
+  case NODE_FUNCTION:
+    len = strlen(node->function.name);
+    copy->function.name = malloc(len + 1);
+    memcpy(copy->function.name, node->function.name, len);
+    copy->function.name[len] = '\0';
+    copy->function.is_public = node->function.is_public;
+    copy->function.params = clone_list(node->function.params);
+    copy->function.body = clone_list(node->function.body);
+    break;
+  case NODE_VAR_DECL:
+    len = strlen(node->var_decl.var_type);
+    copy->var_decl.var_type = malloc(len + 1);
+    memcpy(copy->var_decl.var_type, node->var_decl.var_type, len);
+    copy->var_decl.var_type[len] = '\0';
+    len = strlen(node->var_decl.name);
+    copy->var_decl.name = malloc(len + 1);
+    memcpy(copy->var_decl.name, node->var_decl.name, len);
+    copy->var_decl.name[len] = '\0';
+    copy->var_decl.value = clone_node(node->var_decl.value);
+    break;
+  case NODE_ARRAY_DECL:
+    len = strlen(node->array_decl.name);
+    copy->array_decl.name = malloc(len + 1);
+    memcpy(copy->array_decl.name, node->array_decl.name, len);
+    copy->array_decl.name[len] = '\0';
+    copy->array_decl.elements = clone_node(node->array_decl.elements);
+    break;
+  case NODE_IF:
+    copy->if_stmt.condition = clone_node(node->if_stmt.condition);
+    copy->if_stmt.body = clone_list(node->if_stmt.body);
+    copy->if_stmt.else_body = clone_list(node->if_stmt.else_body);
+    break;
+  case NODE_WHILE:
+    copy->while_stmt.condition = clone_node(node->while_stmt.condition);
+    copy->while_stmt.body = clone_list(node->while_stmt.body);
+    break;
+  case NODE_FOR:
+    len = strlen(node->for_stmt.var_name);
+    copy->for_stmt.var_name = malloc(len + 1);
+    memcpy(copy->for_stmt.var_name, node->for_stmt.var_name, len);
+    copy->for_stmt.var_name[len] = '\0';
+    len = strlen(node->for_stmt.array_name);
+    copy->for_stmt.array_name = malloc(len + 1);
+    memcpy(copy->for_stmt.array_name, node->for_stmt.array_name, len);
+    copy->for_stmt.array_name[len] = '\0';
+    copy->for_stmt.body = clone_list(node->for_stmt.body);
+    break;
+  case NODE_PRINT:
+    copy->print_stmt.value = clone_node(node->print_stmt.value);
+    break;
+  case NODE_RETURN:
+    copy->return_stmt.value = clone_node(node->return_stmt.value);
+    break;
+  case NODE_BINARY_OP:
+    len = strlen(node->binary_op.op);
+    copy->binary_op.op = malloc(len + 1);
+    memcpy(copy->binary_op.op, node->binary_op.op, len);
+    copy->binary_op.op[len] = '\0';
+    copy->binary_op.left = clone_node(node->binary_op.left);
+    copy->binary_op.right = clone_node(node->binary_op.right);
+    break;
+  case NODE_IDENTIFIER:
+    len = strlen(node->identifier.name);
+    copy->identifier.name = malloc(len + 1);
+    memcpy(copy->identifier.name, node->identifier.name, len);
+    copy->identifier.name[len] = '\0';
+    break;
+  case NODE_INT_LITERAL:
+    copy->int_literal.value = node->int_literal.value;
+    break;
+  case NODE_STRING_LITERAL:
+    len = strlen(node->string_literal.value);
+    copy->string_literal.value = malloc(len + 1);
+    memcpy(copy->string_literal.value, node->string_literal.value, len);
+    copy->string_literal.value[len] = '\0';
+    break;
+  case NODE_ARRAY_LITERAL:
+    copy->array_literal.elements = clone_list(node->array_literal.elements);
+    break;
+  case NODE_FUNC_CALL:
+    len = strlen(node->func_call.name);
+    copy->func_call.name = malloc(len + 1);
+    memcpy(copy->func_call.name, node->func_call.name, len);
+    copy->func_call.name[len] = '\0';
+    copy->func_call.args = clone_list(node->func_call.args);
+    break;
+  case NODE_ASSIGNMENT:
+    len = strlen(node->assignment.name);
+    copy->assignment.name = malloc(len + 1);
+    memcpy(copy->assignment.name, node->assignment.name, len);
+    copy->assignment.name[len] = '\0';
+    copy->assignment.value = clone_node(node->assignment.value);
+    break;
+  case NODE_MEMBER_ACCESS:
+    len = strlen(node->member_access.object);
+    copy->member_access.object = malloc(len + 1);
+    memcpy(copy->member_access.object, node->member_access.object, len);
+    copy->member_access.object[len] = '\0';
+    len = strlen(node->member_access.member);
+    copy->member_access.member = malloc(len + 1);
+    memcpy(copy->member_access.member, node->member_access.member, len);
+    copy->member_access.member[len] = '\0';
+    break;
+  }
+  return copy;
+}
+
+/**
+ * @brief Deep-copies a right-linked node list for import merging
+ * @param head First node of the list, may be NULL
+ * @return Fresh list with no links into the original
+ */
+static Node *clone_list(Node *head) {
+  Node *new_head = NULL;
+  Node *tail = NULL;
+  for (Node *s = head; s != NULL; s = s->right) {
+    Node *copy = clone_node(s);
+    if (new_head == NULL) {
+      new_head = copy;
+      tail = copy;
+    } else {
+      tail->right = copy;
+      tail = copy;
+    }
+  }
+  return new_head;
+}
+
+/**
+ * @brief Parses an import statement and merges the functions
+ * @return Always NULL (imported functions append to the program directly)
+ */
+static Node *parse_import() {
+  int stmt_line = current_token->line;
+  int stmt_col = current_token->col;
+  int stmt_width = token_width();
+  current_token++;
+
+  if (current_token->type == END_OF_TOKENS ||
+      strcmp(current_token->value, "[") != 0) {
+    parse_error_expected("Expected '[' after from\n");
+  }
+  current_token++;
+
+  char path[512];
+  size_t path_len = 0;
+  while (current_token->type != END_OF_TOKENS &&
+         strcmp(current_token->value, "]") != 0) {
+    int ok = 0;
+    if (current_token->type == IDENTIFIER || current_token->type == INT) {
+      ok = 1;
+    } else if (current_token->value != NULL &&
+               strlen(current_token->value) == 1 &&
+               (current_token->value[0] == '.' ||
+                current_token->value[0] == '/' ||
+                current_token->value[0] == '\\' ||
+                current_token->value[0] == '-' ||
+                current_token->value[0] == ':')) {
+      ok = 1;
+    }
+    if (!ok) {
+      parse_error("Invalid character in import path\n");
+    }
+    size_t chunk = strlen(current_token->value);
+    if (path_len + chunk >= sizeof(path)) {
+      parse_error("Import path too long\n");
+    }
+    memcpy(path + path_len, current_token->value, chunk);
+    path_len += chunk;
+    current_token++;
+  }
+  if (current_token->type == END_OF_TOKENS) {
+    parse_error_expected("Expected ']' after import path\n");
+  }
+  if (path_len == 0) {
+    parse_error("Empty import path\n");
+  }
+  current_token++;
+  path[path_len] = '\0';
+
+  if (current_token->type != IDENTIFIER ||
+      strcmp(current_token->value, "import") != 0) {
+    parse_error_expected("Expected 'import' after import path\n");
+  }
+  current_token++;
+
+  if (current_token->type == END_OF_TOKENS ||
+      strcmp(current_token->value, "[") != 0) {
+    parse_error_expected("Expected '[' after import\n");
+  }
+  current_token++;
+
+  int empty_list = current_token->type != END_OF_TOKENS &&
+                   strcmp(current_token->value, "]") == 0;
+  if (empty_list) {
+    parse_warning("Empty import list\n");
+  }
+
+  char *names[64];
+  int name_count = 0;
+  int star = 0;
+  while (!empty_list) {
+    if (current_token->type == OPERATOR &&
+        strcmp(current_token->value, "*") == 0) {
+      if (name_count > 0) {
+        parse_warning("Redundant names with import *\n");
+      }
+      star = 1;
+      current_token++;
+    } else if (current_token->type == IDENTIFIER) {
+      if (star) {
+        parse_warning("Redundant names with import *\n");
+      }
+      if (name_count >= 64) {
+        parse_error("Too many imports\n");
+      }
+      size_t len = strlen(current_token->value);
+      names[name_count] = malloc(len + 1);
+      memcpy(names[name_count], current_token->value, len);
+      names[name_count][len] = '\0';
+      name_count++;
+      current_token++;
+    } else {
+      parse_error_expected("Expected import name\n");
+    }
+    if (current_token->type != END_OF_TOKENS &&
+        strcmp(current_token->value, ",") == 0) {
+      current_token++;
+      continue;
+    }
+    if (current_token->type != END_OF_TOKENS &&
+        strcmp(current_token->value, "]") == 0) {
+      break;
+    }
+    parse_error_expected("Expected ',' or ']' in import list\n");
+  }
+  current_token++;
+
+  if (current_token->type == END_OF_TOKENS ||
+      strcmp(current_token->value, ";") != 0) {
+    parse_error_expected("Expected ';' after import statement\n");
+  }
+  current_token++;
+
+  FILE *target = fopen(path, "r");
+  if (!target) {
+    char message[640];
+    snprintf(message, sizeof(message), "Could not open file '%s'", path);
+    parse_error_at(stmt_line, stmt_col, stmt_width, message);
+  }
+  if (import_in_progress(path)) {
+    char message[640];
+    snprintf(message, sizeof(message), "Import cycle detected for '%s'", path);
+    parse_error_at(stmt_line, stmt_col, stmt_width, message);
+  }
+
+  Node *sub_root = NULL;
+  if (!import_is_done(path)) {
+    Token *saved_token = current_token;
+    const char *saved_source = source_filename;
+    Node *saved_head = program_head;
+    Node *saved_tail = program_tail;
+    LexerSnapshot lexer_state;
+    lexer_save(&lexer_state);
+
+    program_head = NULL;
+    program_tail = NULL;
+    Token *sub_tokens = Lexer(target);
+    sub_root = Parser(sub_tokens, path);
+
+    lexer_restore(&lexer_state);
+    current_token = saved_token;
+    source_filename = saved_source;
+    program_head = saved_head;
+    program_tail = saved_tail;
+
+    if (import_done_count >= MAX_IMPORT_DEPTH) {
+      parse_error_at(stmt_line, stmt_col, stmt_width,
+                     "Too many imported files\n");
+    }
+    size_t copy_len = strlen(path);
+    char *path_copy = malloc(copy_len + 1);
+    memcpy(path_copy, path, copy_len);
+    path_copy[copy_len] = '\0';
+    import_done[import_done_count] = path_copy;
+    import_roots[import_done_count] = sub_root;
+    import_done_count++;
+  } else {
+    for (int i = 0; i < import_done_count; i++) {
+      if (strcmp(import_done[i], path) == 0) {
+        sub_root = import_roots[i];
+        break;
+      }
+    }
+  }
+  for (int i = 0; i < name_count; i++) {
+    Node *found = find_function_in(sub_root, names[i]);
+    if (found == NULL) {
+      char message[640];
+      snprintf(message, sizeof(message), "Function '%s' is not defined in '%s'",
+               names[i], path);
+      parse_error_at(stmt_line, stmt_col, stmt_width, message);
+    }
+    if (!found->function.is_public) {
+      char message[640];
+      snprintf(message, sizeof(message), "Function '%s' is private in '%s'",
+               names[i], path);
+      parse_error_at(stmt_line, stmt_col, stmt_width, message);
+    }
+    check_duplicate_fn(names[i], stmt_line, stmt_col, stmt_width);
+    emit_statement(clone_node(found));
+  }
+
+  if (star) {
+    for (Node *s = sub_root; s != NULL; s = s->right) {
+      if (s->type != NODE_FUNCTION || !s->function.is_public) {
+        continue;
+      }
+      int listed = 0;
+      for (int i = 0; i < name_count; i++) {
+        if (strcmp(names[i], s->function.name) == 0) {
+          listed = 1;
+          break;
+        }
+      }
+      if (listed) {
+        continue;
+      }
+      check_duplicate_fn(s->function.name, stmt_line, stmt_col, stmt_width);
+      emit_statement(clone_node(s));
+    }
+  }
+
+  return NULL;
+}
+
+/**
  * @brief Parses a function definition
  * @return AST node for function definition
  */
 static Node *parse_function() {
   Node *node = create_node(NODE_FUNCTION);
   current_token++;
+
+  int is_public = 0;
+  int has_visibility = 0;
+  if (current_token->type == IDENTIFIER &&
+      (strcmp(current_token->value, "public") == 0 ||
+       strcmp(current_token->value, "private") == 0)) {
+    has_visibility = 1;
+    is_public = strcmp(current_token->value, "public") == 0;
+    current_token++;
+  }
 
   if (current_token->type != IDENTIFIER) {
     parse_error_expected("Expected function name\n");
@@ -787,6 +1424,11 @@ static Node *parse_function() {
   node->function.name = malloc(len + 1);
   memcpy(node->function.name, current_token->value, len);
   node->function.name[len] = '\0';
+  check_duplicate_fn(node->function.name, current_token->line,
+                     current_token->col, token_width());
+  int name_line = current_token->line;
+  int name_col = current_token->col;
+  int name_width = token_width();
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
@@ -842,6 +1484,21 @@ static Node *parse_function() {
         param_tail = param;
       }
 
+      const char *pname = param->type == NODE_VAR_DECL ? param->var_decl.name
+                                                       : param->identifier.name;
+      for (Node *p = node->function.params; p != NULL; p = p->right) {
+        if (p == param) {
+          continue;
+        }
+        const char *other =
+            p->type == NODE_VAR_DECL ? p->var_decl.name : p->identifier.name;
+        if (strcmp(other, pname) == 0) {
+          char message[96];
+          snprintf(message, sizeof(message), "Duplicate parameter '%s'", pname);
+          parse_error(message);
+        }
+      }
+
       if (current_token->type != END_OF_TOKENS &&
           strcmp(current_token->value, ",") == 0) {
         current_token++;
@@ -854,7 +1511,31 @@ static Node *parse_function() {
   if (strcmp(current_token->value, ")") != 0) {
     parse_error_expected("Expected ')' after function parameters\n");
   }
+  int paren_line = current_token->line;
+  int paren_col = current_token->col;
   current_token++;
+
+  if (!has_visibility) {
+    char message[96];
+    if (strcmp(node->function.name, "main") == 0) {
+      node->function.is_public = 1;
+      snprintf(message, sizeof(message),
+               "Function 'main' has no visibility, defaulting to public\n");
+    } else {
+      node->function.is_public = 0;
+      snprintf(message, sizeof(message),
+               "Function '%s' has no visibility, defaulting to private\n",
+               node->function.name);
+    }
+    if (paren_line == node->line) {
+      int width = display_span(node->line, node->col, paren_col + 1);
+      parse_warning_at(node->line, node->col, width, message);
+    } else {
+      parse_warning_at(name_line, name_col, name_width, message);
+    }
+  } else {
+    node->function.is_public = is_public;
+  }
 
   if (strcmp(current_token->value, "{") != 0) {
     parse_error_expected("Expected '{' after function declaration\n");
@@ -898,6 +1579,17 @@ static Node *parse_statement() {
       return parse_function();
     }
   } else if (current_token->type == IDENTIFIER) {
+    if (strcmp(current_token->value, "from") == 0 &&
+        current_token[1].value != NULL &&
+        strcmp(current_token[1].value, "[") == 0) {
+      return parse_import();
+    }
+    if (strcmp(current_token->value, "import") == 0 &&
+        current_token[1].value != NULL &&
+        strcmp(current_token[1].value, "[") == 0) {
+      parse_error(
+          "Expected 'from' before import, use from [file] import [...]\n");
+    }
     if (current_token[1].value != NULL &&
         strcmp(current_token[1].value, "(") == 0) {
       Node *call = parse_func_call_expr();
@@ -915,32 +1607,98 @@ static Node *parse_statement() {
       parse_error("Unexpected member access in statement\n");
     }
   }
+  if (current_token->value != NULL) {
+    char message[96];
+    snprintf(message, sizeof(message), "Unexpected '%s' in statement",
+             current_token->value);
+    parse_error(message);
+  }
   parse_error("Unexpected token in statement\n");
 }
 
 Node *Parser(Token *tokens, const char *filename) {
   source_filename = filename;
   current_token = tokens;
+  program_head = NULL;
+  program_tail = NULL;
+  push_import(filename);
 
-  Node *statements = NULL;
   Node *current = NULL;
 
   while (current_token->type != END_OF_TOKENS) {
     if (current != NULL && current->type == NODE_RETURN) {
-      parse_warning("Unreachable code after return");
+      parse_warning_line("Unreachable code after return");
     }
     Node *stmt = parse_statement();
-
-    if (statements == NULL) {
-      statements = stmt;
-      current = stmt;
-    } else {
-      current->right = stmt;
+    emit_statement(stmt);
+    if (stmt != NULL) {
       current = stmt;
     }
   }
 
-  return statements;
+  int progressed = 1;
+  while (progressed) {
+    progressed = 0;
+    for (Node *s = program_head; s != NULL; s = s->right) {
+      Node *calls[1024];
+      int call_count = 0;
+      collect_calls(s, calls, &call_count, 1024);
+      for (int k = 0; k < call_count; k++) {
+        if (find_function_in(program_head, calls[k]->func_call.name) != NULL) {
+          continue;
+        }
+        Node *dep = NULL;
+        for (int r = 0; r < import_done_count && dep == NULL; r++) {
+          dep = find_function_in(import_roots[r], calls[k]->func_call.name);
+        }
+        if (dep == NULL) {
+          continue;
+        }
+        emit_statement(clone_node(dep));
+        progressed = 1;
+      }
+    }
+  }
+
+  if (import_depth == 1) {
+    for (Node *s = program_head; s != NULL; s = s->right) {
+      Node *calls[1024];
+      int call_count = 0;
+      collect_calls(s, calls, &call_count, 1024);
+      for (int k = 0; k < call_count; k++) {
+        Node *def = find_function_in(program_head, calls[k]->func_call.name);
+        if (def == NULL) {
+          char message[96];
+          snprintf(message, sizeof(message), "Function '%s' is not defined",
+                   calls[k]->func_call.name);
+          parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width,
+                         message);
+        }
+        int want = 0;
+        for (Node *p = def->function.params; p != NULL; p = p->right) {
+          want++;
+        }
+        int got = 0;
+        for (Node *a = calls[k]->func_call.args; a != NULL; a = a->right) {
+          got++;
+        }
+        if (want != got) {
+          char message[96];
+          snprintf(message, sizeof(message), "Expected %d arguments, got %d",
+                   want, got);
+          parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width,
+                         message);
+        }
+      }
+    }
+  }
+
+  pop_import();
+
+  Node *root = program_head;
+  program_head = NULL;
+  program_tail = NULL;
+  return root;
 }
 
 void print_tree(Node *root) {
@@ -951,7 +1709,9 @@ void print_tree(Node *root) {
 
   switch (root->type) {
   case NODE_FUNCTION:
-    printf("Function(%s, params: ", root->function.name);
+    printf("Function(%s %s, params: ",
+           root->function.is_public ? "public" : "private",
+           root->function.name);
     print_tree(root->function.params);
     printf(", body: ");
     print_tree(root->function.body);
