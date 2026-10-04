@@ -20,6 +20,9 @@ static char *var_names[64];
 /** Whether a variable holds a string pointer (1) or an integer (0) */
 static int var_is_string[64];
 
+/** Whether a variable is a function parameter (1) or a local (0) */
+static int var_is_param[64];
+
 /** Number of variables in the current frame */
 static int var_count;
 
@@ -41,6 +44,38 @@ static void gen_statement(Node *node);
 /** Forward declaration for block generation */
 static void gen_block(Node *list);
 
+/** Source file name for error messages */
+static const char *codegen_filename;
+
+/**
+ * @brief Prints a modern error for an AST node and exits
+ * @param node Fault node, may be NULL (uses 1:1 then)
+ * @param format printf-style message without the Error: prefix
+ */
+static NORETURN void codegen_error(Node *node, const char *format, ...) {
+  char message[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  int line = 1;
+  int col = 1;
+  int width = 1;
+  if (node != NULL) {
+    if (node->line > 0) {
+      line = node->line;
+    }
+    if (node->col > 0) {
+      col = node->col;
+    }
+    if (node->width > 0) {
+      width = node->width;
+    }
+  }
+  term_report(TERM_ERROR, codegen_filename, line, col, width, message);
+  exit(1);
+}
+
 /**
  * @brief Finds a variable in the current frame
  * @param name Variable name to look up
@@ -57,22 +92,56 @@ static int find_var(const char *name) {
 
 /**
  * @brief Adds a variable to the current frame
+ * @param node Declaration node at fault if the frame is full
  * @param name Variable name to store
  * @param is_str Non-zero if the variable holds a string pointer
+ * @param is_param Non-zero if the variable is a function parameter
  * @return Slot index of the new variable
  */
-static int add_var(const char *name, int is_str) {
+static int add_var(Node *node, const char *name, int is_str, int is_param) {
   if (var_count >= 32) {
-    printf("Error: Too many variables in function\n");
-    exit(1);
+    codegen_error(node, "Too many variables in function");
   }
   size_t len = strlen(name);
   var_names[var_count] = malloc(len + 1);
   memcpy(var_names[var_count], name, len);
   var_names[var_count][len] = '\0';
   var_is_string[var_count] = is_str;
+  var_is_param[var_count] = is_param;
   var_count++;
   return var_count - 1;
+}
+
+/**
+ * @brief Loads a variable slot, rejecting bare parameter access
+ * @param node Identifier node at fault
+ * @param name Variable name from source
+ * @return Slot index
+ */
+static int require_var(Node *node, const char *name) {
+  int slot = find_var(name);
+  if (slot < 0) {
+    codegen_error(node, "Variable '%s' not declared", name);
+  }
+  if (var_is_param[slot]) {
+    codegen_error(node, "Parameter '%s' must be accessed as self.%s", name,
+                  name);
+  }
+  return slot;
+}
+
+/**
+ * @brief Loads a parameter slot for self.member access
+ * @param node Member access node at fault
+ * @param member Member name from source
+ * @return Slot index
+ */
+static int require_param(Node *node, const char *member) {
+  int slot = find_var(member);
+  if (slot < 0 || !var_is_param[slot]) {
+    codegen_error(node, "'%s' is not a parameter", member);
+  }
+  return slot;
 }
 
 /**
@@ -87,8 +156,7 @@ static int add_string(const char *value) {
     }
   }
   if (string_count >= 256) {
-    printf("Error: Too many string literals\n");
-    exit(1);
+    codegen_error(NULL, "Too many string literals");
   }
   size_t len = strlen(value);
   string_table[string_count] = malloc(len + 1);
@@ -129,6 +197,12 @@ static void collect_print_chunks(const char *value) {
       if (is_name_start(value[j])) {
         while (is_name_char(value[j])) {
           j++;
+        }
+        if (value[j] == '.' && is_name_start(value[j + 1])) {
+          j++;
+          while (is_name_char(value[j])) {
+            j++;
+          }
         }
         if (value[j] == '}') {
           if (i > start) {
@@ -326,6 +400,8 @@ static const char *func_label(const char *name) {
 /**
  * @brief Generates code for a function call, result left in rax
  * @param node Call node to generate
+ * @details First four arguments use rcx, rdx, r8, r9. The rest spill
+ * onto the stack above the 32 byte shadow space (Windows x64).
  */
 static void gen_call(Node *node) {
   const char *regs[4] = {"rcx", "rdx", "r8", "r9"};
@@ -333,19 +409,39 @@ static void gen_call(Node *node) {
   for (Node *a = node->func_call.args; a != NULL; a = a->right) {
     arg_count++;
   }
-  if (arg_count > 4) {
-    printf("Error: Only up to 4 call arguments supported in codegen\n");
-    exit(1);
+  if (arg_count <= 4) {
+    int i = 0;
+    for (Node *a = node->func_call.args; a != NULL; a = a->right) {
+      gen_expression(a);
+      fprintf(out, "  mov %s, rax\n", regs[i]);
+      i++;
+    }
+    fprintf(out, "  sub rsp, 32\n");
+    fprintf(out, "  call %s\n", func_label(node->func_call.name));
+    fprintf(out, "  add rsp, 32\n");
+    return;
   }
+
+  int frame = 64 + 8 * (arg_count - 4);
+  if (frame % 16 != 0) {
+    frame += 8;
+  }
+  fprintf(out, "  sub rsp, %d\n", frame);
   int i = 0;
   for (Node *a = node->func_call.args; a != NULL; a = a->right) {
     gen_expression(a);
-    fprintf(out, "  mov %s, rax\n", regs[i]);
+    if (i < 4) {
+      fprintf(out, "  mov [rsp + %d], rax\n", frame - 32 + 8 * i);
+    } else {
+      fprintf(out, "  mov [rsp + %d], rax\n", 32 + 8 * (i - 4));
+    }
     i++;
   }
-  fprintf(out, "  sub rsp, 32\n");
+  for (i = 0; i < 4; i++) {
+    fprintf(out, "  mov %s, [rsp + %d]\n", regs[i], frame - 32 + 8 * i);
+  }
   fprintf(out, "  call %s\n", func_label(node->func_call.name));
-  fprintf(out, "  add rsp, 32\n");
+  fprintf(out, "  add rsp, %d\n", frame);
 }
 
 /**
@@ -354,8 +450,7 @@ static void gen_call(Node *node) {
  */
 static void gen_expression(Node *node) {
   if (node == NULL) {
-    printf("Error: NULL expression in codegen\n");
-    exit(1);
+    codegen_error(NULL, "NULL expression in codegen");
   }
 
   switch (node->type) {
@@ -363,11 +458,16 @@ static void gen_expression(Node *node) {
     fprintf(out, "  mov rax, %d\n", node->int_literal.value);
     break;
   case NODE_IDENTIFIER: {
-    int slot = find_var(node->identifier.name);
-    if (slot < 0) {
-      printf("Error: Variable '%s' not declared\n", node->identifier.name);
+    int slot = require_var(node, node->identifier.name);
+    fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+    break;
+  }
+  case NODE_MEMBER_ACCESS: {
+    if (strcmp(node->member_access.object, "self") != 0) {
+      printf("Error: Only self.member access is supported\n");
       exit(1);
     }
+    int slot = require_param(node, node->member_access.member);
     fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
     break;
   }
@@ -380,8 +480,7 @@ static void gen_expression(Node *node) {
     gen_call(node);
     break;
   case NODE_ARRAY_LITERAL:
-    printf("Error: Array literal not supported in codegen expression\n");
-    exit(1);
+    codegen_error(node, "Array literal not supported in codegen expression");
     break;
   case NODE_BINARY_OP: {
     const char *op = node->binary_op.op;
@@ -428,14 +527,12 @@ static void gen_expression(Node *node) {
       fprintf(out, "  setge al\n");
       fprintf(out, "  movzx rax, al\n");
     } else {
-      printf("Error: Unsupported operator '%s' in codegen\n", op);
-      exit(1);
+      codegen_error(node, "Unsupported operator '%s' in codegen", op);
     }
     break;
   }
   default:
-    printf("Error: Unexpected expression in codegen\n");
-    exit(1);
+    codegen_error(node, "Unexpected expression in codegen");
     break;
   }
 }
@@ -480,9 +577,10 @@ static void gen_condition_jump(Node *cond, int false_label) {
 
 /**
  * @brief Generates code for an interpolated print string
+ * @param strnode String literal node at fault on bad placeholders
  * @param value Raw string value (may contain {name} placeholders)
  */
-static void gen_print_string(const char *value) {
+static void gen_print_string(Node *strnode, const char *value) {
   size_t start = 0;
   size_t i = 0;
   while (value[i] != '\0') {
@@ -491,6 +589,12 @@ static void gen_print_string(const char *value) {
       if (is_name_start(value[j])) {
         while (is_name_char(value[j])) {
           j++;
+        }
+        if (value[j] == '.' && is_name_start(value[j + 1])) {
+          j++;
+          while (is_name_char(value[j])) {
+            j++;
+          }
         }
         if (value[j] == '}') {
           if (i > start) {
@@ -510,10 +614,16 @@ static void gen_print_string(const char *value) {
           char *name = malloc(name_len + 1);
           memcpy(name, value + i + 1, name_len);
           name[name_len] = '\0';
-          int slot = find_var(name);
-          if (slot < 0) {
-            printf("Error: Variable '%s' not declared\n", name);
-            exit(1);
+          char *dot = strchr(name, '.');
+          int slot;
+          if (dot == NULL) {
+            slot = require_var(strnode, name);
+          } else {
+            *dot = '\0';
+            if (strcmp(name, "self") != 0) {
+              codegen_error(strnode, "Only self.member access is supported");
+            }
+            slot = require_param(strnode, dot + 1);
           }
           free(name);
           if (var_is_string[slot]) {
@@ -569,8 +679,8 @@ static void gen_statement(Node *node) {
   switch (node->type) {
   case NODE_VAR_DECL: {
     if (find_var(node->var_decl.name) >= 0) {
-      printf("Error: Variable '%s' already declared\n", node->var_decl.name);
-      exit(1);
+      codegen_error(node, "Variable '%s' already declared",
+                    node->var_decl.name);
     }
     int is_str = 0;
     if (node->var_decl.value != NULL &&
@@ -581,7 +691,7 @@ static void gen_statement(Node *node) {
         strcmp(node->var_decl.var_type, "string") == 0) {
       is_str = 1;
     }
-    int slot = add_var(node->var_decl.name, is_str);
+    int slot = add_var(node, node->var_decl.name, is_str, 0);
     if (node->var_decl.value != NULL) {
       gen_expression(node->var_decl.value);
       fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
@@ -591,11 +701,7 @@ static void gen_statement(Node *node) {
     break;
   }
   case NODE_ASSIGNMENT: {
-    int slot = find_var(node->assignment.name);
-    if (slot < 0) {
-      printf("Error: Variable '%s' not declared\n", node->assignment.name);
-      exit(1);
-    }
+    int slot = require_var(node, node->assignment.name);
     gen_expression(node->assignment.value);
     fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
     break;
@@ -603,13 +709,9 @@ static void gen_statement(Node *node) {
   case NODE_PRINT: {
     Node *value = node->print_stmt.value;
     if (value != NULL && value->type == NODE_STRING_LITERAL) {
-      gen_print_string(value->string_literal.value);
+      gen_print_string(value, value->string_literal.value);
     } else if (value != NULL && value->type == NODE_IDENTIFIER) {
-      int slot = find_var(value->identifier.name);
-      if (slot < 0) {
-        printf("Error: Variable '%s' not declared\n", value->identifier.name);
-        exit(1);
-      }
+      int slot = require_var(value, value->identifier.name);
       if (var_is_string[slot]) {
         fprintf(out, "  lea rcx, [rel fmt_str]\n");
         fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
@@ -674,20 +776,16 @@ static void gen_statement(Node *node) {
     gen_call(node);
     break;
   case NODE_FUNCTION:
-    printf("Error: Nested functions not supported in codegen\n");
-    exit(1);
+    codegen_error(node, "Nested functions not supported in codegen");
     break;
   case NODE_ARRAY_DECL:
-    printf("Error: Arrays not supported in codegen yet\n");
-    exit(1);
+    codegen_error(node, "Arrays not supported in codegen yet");
     break;
   case NODE_FOR:
-    printf("Error: For loops not supported in codegen yet\n");
-    exit(1);
+    codegen_error(node, "For loops not supported in codegen yet");
     break;
   default:
-    printf("Error: Unexpected statement in codegen\n");
-    exit(1);
+    codegen_error(node, "Unexpected statement in codegen");
     break;
   }
 }
@@ -709,21 +807,21 @@ static void gen_function(Node *node) {
   int param_index = 0;
   const char *param_regs[4] = {"rcx", "rdx", "r8", "r9"};
   for (Node *p = node->function.params; p != NULL; p = p->right) {
-    if (param_index >= 4) {
-      printf("Error: Only up to 4 function parameters supported\n");
-      exit(1);
-    }
+    const char *param_name = NULL;
     if (p->type == NODE_VAR_DECL) {
-      int slot = add_var(p->var_decl.name, 0);
-      fprintf(out, "  mov [rbp - %d], %s\n", (slot + 1) * 8,
-              param_regs[param_index]);
+      param_name = p->var_decl.name;
     } else if (p->type == NODE_IDENTIFIER) {
-      int slot = add_var(p->identifier.name, 0);
+      param_name = p->identifier.name;
+    } else {
+      codegen_error(p, "Unexpected parameter in codegen");
+    }
+    int slot = add_var(p, param_name, 0, 1);
+    if (param_index < 4) {
       fprintf(out, "  mov [rbp - %d], %s\n", (slot + 1) * 8,
               param_regs[param_index]);
     } else {
-      printf("Error: Unexpected parameter in codegen\n");
-      exit(1);
+      fprintf(out, "  mov rax, [rbp + %d]\n", 48 + 8 * (param_index - 4));
+      fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
     }
     param_index++;
   }
@@ -746,6 +844,7 @@ static void gen_function(Node *node) {
  * Functions (including fn main, emitted as jot_main) run when called.
  */
 void GenerateAssembly(Node *root, const char *filename) {
+  codegen_filename = filename;
   label_id = 0;
   string_count = 0;
   var_count = 0;
@@ -764,8 +863,7 @@ void GenerateAssembly(Node *root, const char *filename) {
 
   out = fopen(filename, "w");
   if (!out) {
-    printf("Error: Could not open output file '%s'\n", filename);
-    exit(1);
+    codegen_error(NULL, "Could not open output file '%s'", filename);
   }
 
   fprintf(out, "global main\n");

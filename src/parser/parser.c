@@ -24,30 +24,22 @@ static Node *parse_block_statements();
  */
 static Node *parse_func_call_expr();
 
-#if defined(_MSC_VER)
-#define NORETURN __declspec(noreturn)
-#else
-#define NORETURN __attribute__((noreturn))
-#endif
+/**
+ * @brief Width of the current token for squiggles
+ * @return Display width, at least 1
+ */
+static int token_width() {
+  if (current_token->value != NULL && current_token->value[0] != '\0') {
+    return (int)strlen(current_token->value);
+  }
+  return 1;
+}
 
 /**
- * @brief Prints a diagnostic with source context (no exit)
- * @param kind Kind label without colon (Error or Warning)
- * @param kind_color ANSI code for the label and squiggle
- * @param message Diagnostic message without the kind prefix
+ * @brief Prints a clang-style error with source context and exits
+ * @param message Error message without the Error: prefix
  */
-static void print_diagnostic(const char *kind, const char *kind_color,
-                             const char *message) {
-  size_t len = strlen(message);
-  if (len > 0 && message[len - 1] == '\n') {
-    len--;
-  }
-
-  int color = terminal_setup_colors();
-  const char *mark = color ? kind_color : "";
-  const char *bold = color ? "\x1b[1m" : "";
-  const char *reset = color ? "\x1b[0m" : "";
-
+static NORETURN void parse_error(const char *message) {
   int line = current_token->line;
   int col = current_token->col;
   if (line < 1) {
@@ -78,67 +70,7 @@ static void print_diagnostic(const char *kind, const char *kind_color,
     }
   }
 
-  fprintf(stdout, "%s%s:%s %.*s\n", mark, kind, reset, (int)len, message);
-  fprintf(stdout, "  --> %s:%d:%d\n", source_filename, line, col);
-
-  int text_len = 0;
-  const char *text = lexer_source_line(line, &text_len);
-  if (text != NULL) {
-    fprintf(stdout, "     |\n");
-    fprintf(stdout, "%4d | ", line);
-    int shown = 0;
-    for (int i = 0; i < text_len; i++) {
-      if (text[i] == '\t') {
-        int next = ((shown / 4) + 1) * 4;
-        while (shown < next) {
-          fputc(' ', stdout);
-          shown++;
-        }
-      } else {
-        fputc(text[i], stdout);
-        shown++;
-      }
-    }
-    fputc('\n', stdout);
-
-    int caret = 0;
-    for (int i = 0; i < col - 1 && i < text_len; i++) {
-      if (text[i] == '\t') {
-        caret = ((caret / 4) + 1) * 4;
-      } else {
-        caret++;
-      }
-    }
-    int width = 1;
-    if (current_token->value != NULL) {
-      width = (int)strlen(current_token->value);
-      if (width < 1) {
-        width = 1;
-      }
-    }
-    fprintf(stdout, "     | ");
-    for (int i = 0; i < caret; i++) {
-      fputc(' ', stdout);
-    }
-    if (width > 1) {
-      fprintf(stdout, "%s", mark);
-      for (int i = 0; i < width; i++) {
-        fputc('~', stdout);
-      }
-      fprintf(stdout, "%s", reset);
-    } else {
-      fprintf(stdout, "%s^%s", bold, reset);
-    }
-    fputc('\n', stdout);
-  }
-}
-
-/**
- * @brief Prints a clang-style error with source context and exits
- * @param message Error message without the Error: prefix
- */
-static NORETURN void parse_error(const char *message) {
-  print_diagnostic("Error", "\x1b[1;31m", message);
+  term_report(TERM_ERROR, source_filename, line, col, token_width(), message);
   exit(1);
 }
 
@@ -147,7 +79,8 @@ static NORETURN void parse_error(const char *message) {
  * @param message Warning message without the Warning: prefix
  */
 static void parse_warning(const char *message) {
-  print_diagnostic("Warning", "\x1b[1;33m", message);
+  term_report(TERM_WARNING, source_filename, current_token->line,
+              current_token->col, token_width(), message);
 }
 
 /**
@@ -160,6 +93,12 @@ static Node *create_node(NodeType type) {
   node->type = type;
   node->left = NULL;
   node->right = NULL;
+  node->line = current_token->line;
+  node->col = current_token->col;
+  node->width = 1;
+  if (current_token->value != NULL && current_token->value[0] != '\0') {
+    node->width = (int)strlen(current_token->value);
+  }
   return node;
 }
 
@@ -199,6 +138,34 @@ static Node *parse_string_literal() {
   memcpy(node->string_literal.value, current_token->value, len);
   node->string_literal.value[len] = '\0';
   current_token++;
+  return node;
+}
+
+/**
+ * @brief Parses a member access (object.member)
+ * @param object Object identifier node (already parsed)
+ * @return AST node for member access
+ */
+static Node *parse_member_access(Node *object) {
+  Node *node = create_node(NODE_MEMBER_ACCESS);
+  size_t len = strlen(object->identifier.name);
+  node->member_access.object = malloc(len + 1);
+  memcpy(node->member_access.object, object->identifier.name, len);
+  node->member_access.object[len] = '\0';
+  current_token++;
+
+  if (current_token->type != IDENTIFIER) {
+    parse_error("Expected member name after '.'\n");
+  }
+  len = strlen(current_token->value);
+  node->member_access.member = malloc(len + 1);
+  memcpy(node->member_access.member, current_token->value, len);
+  node->member_access.member[len] = '\0';
+  node->line = current_token->line;
+  node->col = current_token->col;
+  node->width = (int)len;
+  current_token++;
+
   return node;
 }
 
@@ -268,7 +235,12 @@ static Node *parse_primary() {
         strcmp(current_token[1].value, "(") == 0) {
       return parse_func_call_expr();
     }
-    return parse_identifier();
+    Node *object = parse_identifier();
+    if (current_token->type != END_OF_TOKENS &&
+        strcmp(current_token->value, ".") == 0) {
+      return parse_member_access(object);
+    }
+    return object;
   } else if (current_token->type == STRING) {
     return parse_string_literal();
   } else if (strcmp(current_token->value, "(") == 0) {
@@ -844,6 +816,9 @@ static Node *parse_statement() {
     } else if (current_token[1].value != NULL &&
                strcmp(current_token[1].value, "=") == 0) {
       return parse_assignment();
+    } else if (current_token[1].value != NULL &&
+               strcmp(current_token[1].value, ".") == 0) {
+      parse_error("Unexpected member access in statement\n");
     }
   }
   parse_error("Unexpected token in statement\n");
@@ -963,6 +938,10 @@ void print_tree(Node *root) {
     printf("Assign(%s = ", root->assignment.name);
     print_tree(root->assignment.value);
     printf(")");
+    break;
+  case NODE_MEMBER_ACCESS:
+    printf("Member(%s.%s)", root->member_access.object,
+           root->member_access.member);
     break;
   default:
     printf("Unknown");

@@ -2,7 +2,9 @@
 #define CODEGEN_H
 
 #include "../parser/parser.h"
+#include "../terminal/terminal.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

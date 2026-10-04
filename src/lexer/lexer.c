@@ -69,7 +69,8 @@ Token *Lexer(FILE *file) {
       case '}':
       case '[':
       case ']':
-      case ',': {
+      case ',':
+      case '.': {
         Token *token = lex_separator(character);
         tokens[tokens_index] = *token;
         tokens_index++;

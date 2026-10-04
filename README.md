@@ -14,7 +14,8 @@ Working end-to-end compiler: lexer (tokens) → parser (AST) → codegen (`.asm`
 - **Separators**: Semicolons, parentheses, braces, brackets, commas
 - **Control Flow**: if/else statements (plus else-if), while loops
 - **Data Types**: int, bool, string, char (arrays parse but codegen rejects them for now, same for `for` loops)
-- **Functions**: Definitions with typed or untyped params (up to 4 args per call). Nothing runs until called — top-level statements are the entry point, `fn main` is an ordinary function invoked with `main();`
+- **Functions**: Definitions with typed or untyped params (any count: first four use registers, the rest spill to the stack). Nothing runs until called — top-level statements are the entry point, `fn main` is an ordinary function invoked with `main();`. Inside a body, parameters are read as `self.name` (bare parameter names are rejected); locals stay bare
+- **Member access**: `self.arg` for parameters (also inside `{...}` print interpolation). Other objects and member assignment are not supported
 - **Print**: `print(x);` for values, `print("x={x}\n");` with `{name}` interpolation
 - **Return**: `return(v);` returns from a function (`rax`), top-level `return(v);` exits the process with code `v`
 - **Comments**: Single-line comments (`//`)
@@ -67,6 +68,20 @@ make run
 ```
 
 prints `Y: 6 ` (the `1` is `main`'s return value to its caller; the process exits `0`).
+
+Parameters use `self`:
+
+```jot
+fn add(int var1, int var2) {
+  int sum = self.var1 + self.var2;
+  print("Sum: {sum}\n");
+  return(sum);
+}
+
+add(10, 20);
+```
+
+prints `Sum: 30`.
 
 ## Implementation
 

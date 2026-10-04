@@ -4,7 +4,6 @@
 #include "../lexer/lexer.h"
 #include "../terminal/terminal.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +26,8 @@ typedef enum {
   NODE_STRING_LITERAL, /**< String literal */
   NODE_ARRAY_LITERAL,  /**< Array literal */
   NODE_FUNC_CALL,      /**< Function call */
-  NODE_ASSIGNMENT      /**< Assignment statement */
+  NODE_ASSIGNMENT,     /**< Assignment statement */
+  NODE_MEMBER_ACCESS   /**< Member access (object.member) */
 } NodeType;
 
 /**
@@ -37,6 +37,9 @@ typedef struct Node {
   NodeType type;      /**< Type of the node */
   struct Node *left;  /**< Unused (reserved) */
   struct Node *right; /**< Next node in statement, argument or element lists */
+  int line;           /**< 1-based source line of the construct */
+  int col;            /**< 1-based source column of the construct */
+  int width;          /**< Source width for squiggles, at least 1 */
   union {
     struct {
       char *name; /**< Function name */
@@ -98,6 +101,10 @@ typedef struct Node {
       char *name;         /**< Variable name */
       struct Node *value; /**< Assigned value */
     } assignment;
+    struct {
+      char *object; /**< Object name */
+      char *member; /**< Member name */
+    } member_access;
   };
 } Node;
 
