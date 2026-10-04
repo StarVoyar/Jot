@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "codegen.h"
 
 /** Output assembly file */
@@ -94,6 +96,65 @@ static int add_string(const char *value) {
 }
 
 /**
+ * @brief Checks if a character can start an interpolated name
+ * @param c Character to check
+ * @return Non-zero if it can start a name
+ */
+static int is_name_start(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+
+/**
+ * @brief Checks if a character can continue an interpolated name
+ * @param c Character to check
+ * @return Non-zero if it can continue a name
+ */
+static int is_name_char(char c) {
+  return is_name_start(c) || (c >= '0' && c <= '9');
+}
+
+/**
+ * @brief Collects literal chunks of an interpolated print string
+ * @param value Raw string value (may contain {name} placeholders)
+ */
+static void collect_print_chunks(const char *value) {
+  size_t start = 0;
+  size_t i = 0;
+  while (value[i] != '\0') {
+    if (value[i] == '{') {
+      size_t j = i + 1;
+      if (is_name_start(value[j])) {
+        while (is_name_char(value[j])) {
+          j++;
+        }
+        if (value[j] == '}') {
+          if (i > start) {
+            size_t len = i - start;
+            char *chunk = malloc(len + 1);
+            memcpy(chunk, value + start, len);
+            chunk[len] = '\0';
+            add_string(chunk);
+            free(chunk);
+          }
+          i = j + 1;
+          start = i;
+          continue;
+        }
+      }
+    }
+    i++;
+  }
+  if (value[i] == '\0' && i > start) {
+    size_t len = i - start;
+    char *chunk = malloc(len + 1);
+    memcpy(chunk, value + start, len);
+    chunk[len] = '\0';
+    add_string(chunk);
+    free(chunk);
+  }
+}
+
+/**
  * @brief Walks the AST and collects every string literal
  * @param node Node to visit (follows right sibling chain)
  */
@@ -110,7 +171,12 @@ static void collect_strings(Node *node) {
     collect_strings(node->var_decl.value);
     break;
   case NODE_PRINT:
-    collect_strings(node->print_stmt.value);
+    if (node->print_stmt.value != NULL &&
+        node->print_stmt.value->type == NODE_STRING_LITERAL) {
+      collect_print_chunks(node->print_stmt.value->string_literal.value);
+    } else {
+      collect_strings(node->print_stmt.value);
+    }
     break;
   case NODE_RETURN:
     collect_strings(node->return_stmt.value);
@@ -220,6 +286,7 @@ static void write_nasm_string(const char *value) {
 static void gen_data_section() {
   fprintf(out, "section .data\n");
   fprintf(out, "  fmt_int db \"%%d\", 10, 0\n");
+  fprintf(out, "  fmt_int_raw db \"%%d\", 0\n");
   fprintf(out, "  fmt_str db \"%%s\", 0\n");
   for (int i = 0; i < string_count; i++) {
     fprintf(out, "  str%d db ", i);
@@ -397,6 +464,77 @@ static void gen_condition_jump(Node *cond, int false_label) {
 }
 
 /**
+ * @brief Generates code for an interpolated print string
+ * @param value Raw string value (may contain {name} placeholders)
+ */
+static void gen_print_string(const char *value) {
+  size_t start = 0;
+  size_t i = 0;
+  while (value[i] != '\0') {
+    if (value[i] == '{') {
+      size_t j = i + 1;
+      if (is_name_start(value[j])) {
+        while (is_name_char(value[j])) {
+          j++;
+        }
+        if (value[j] == '}') {
+          if (i > start) {
+            size_t len = i - start;
+            char *chunk = malloc(len + 1);
+            memcpy(chunk, value + start, len);
+            chunk[len] = '\0';
+            int idx = add_string(chunk);
+            free(chunk);
+            fprintf(out, "  lea rcx, [rel fmt_str]\n");
+            fprintf(out, "  lea rdx, [rel str%d]\n", idx);
+            fprintf(out, "  sub rsp, 32\n");
+            fprintf(out, "  call printf\n");
+            fprintf(out, "  add rsp, 32\n");
+          }
+          size_t name_len = j - (i + 1);
+          char *name = malloc(name_len + 1);
+          memcpy(name, value + i + 1, name_len);
+          name[name_len] = '\0';
+          int slot = find_var(name);
+          if (slot < 0) {
+            printf("Error: Variable '%s' not declared\n", name);
+            exit(1);
+          }
+          free(name);
+          if (var_is_string[slot]) {
+            fprintf(out, "  lea rcx, [rel fmt_str]\n");
+            fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
+          } else {
+            fprintf(out, "  lea rcx, [rel fmt_int_raw]\n");
+            fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
+          }
+          fprintf(out, "  sub rsp, 32\n");
+          fprintf(out, "  call printf\n");
+          fprintf(out, "  add rsp, 32\n");
+          i = j + 1;
+          start = i;
+          continue;
+        }
+      }
+    }
+    i++;
+  }
+  if (value[i] == '\0' && i > start) {
+    size_t len = i - start;
+    char *chunk = malloc(len + 1);
+    memcpy(chunk, value + start, len);
+    chunk[len] = '\0';
+    int idx = add_string(chunk);
+    free(chunk);
+    fprintf(out, "  lea rcx, [rel fmt_str]\n");
+    fprintf(out, "  lea rdx, [rel str%d]\n", idx);
+    fprintf(out, "  sub rsp, 32\n");
+    fprintf(out, "  call printf\n");
+    fprintf(out, "  add rsp, 32\n");
+  }
+}
+
+/**
  * @brief Generates code for a block of statements
  * @param list First statement in the block (linked via right)
  */
@@ -450,12 +588,7 @@ static void gen_statement(Node *node) {
   case NODE_PRINT: {
     Node *value = node->print_stmt.value;
     if (value != NULL && value->type == NODE_STRING_LITERAL) {
-      int idx = add_string(value->string_literal.value);
-      fprintf(out, "  lea rcx, [rel fmt_str]\n");
-      fprintf(out, "  lea rdx, [rel str%d]\n", idx);
-      fprintf(out, "  sub rsp, 32\n");
-      fprintf(out, "  call printf\n");
-      fprintf(out, "  add rsp, 32\n");
+      gen_print_string(value->string_literal.value);
     } else if (value != NULL && value->type == NODE_IDENTIFIER) {
       int slot = find_var(value->identifier.name);
       if (slot < 0) {

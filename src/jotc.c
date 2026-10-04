@@ -1,8 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 
+#include "codegen/codegen.h"
 #include "lexer/lexer.h"
 #include "parser/parser.h"
-#include "codegen/codegen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,9 +58,22 @@ static char *default_out_path(const char *input) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    printf("Usage: %s <file.jot> [output.asm]\n", argv[0]);
+  if (argc < 2 || strcmp(argv[1], "--help") == 0) {
+    printf("Usage: %s <file.jot> [output.asm] [--debug]\n", argv[0]);
     return 1;
+  }
+
+  int debug = 0;
+  const char *out_arg = NULL;
+  for (int i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "--debug") == 0) {
+      debug = 1;
+    } else if (out_arg == NULL) {
+      out_arg = argv[i];
+    } else {
+      printf("Usage: %s <file.jot> [output.asm] [--debug]\n", argv[0]);
+      return 1;
+    }
   }
 
   FILE *file;
@@ -72,18 +85,22 @@ int main(int argc, char *argv[]) {
 
   Token *tokens = Lexer(file);
 
-  for (size_t i = 0; tokens[i].type != END_OF_TOKENS; i++) {
-    print_token(tokens[i]);
+  if (debug) {
+    for (size_t i = 0; tokens[i].type != END_OF_TOKENS; i++) {
+      print_token(tokens[i]);
+    }
   }
 
   Node *ast = Parser(tokens);
-  print_tree(ast);
-  printf("\n");
+  if (debug) {
+    print_tree(ast);
+    printf("\n");
+  }
 
   char *default_out = NULL;
   const char *out_file = NULL;
-  if (argc >= 3) {
-    out_file = argv[2];
+  if (out_arg != NULL) {
+    out_file = out_arg;
   } else {
     ensure_dir("build");
     ensure_dir("build/bin");
@@ -93,7 +110,9 @@ int main(int argc, char *argv[]) {
   }
 
   GenerateAssembly(ast, out_file);
-  printf("Assembly written to '%s'\n", out_file);
+  if (debug) {
+    printf("Assembly written to '%s'\n", out_file);
+  }
 
   free(default_out);
 

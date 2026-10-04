@@ -1,10 +1,12 @@
 # Build artifacts
 *.o
+*.obj
 *.exe
 *.out
 *.a
 *.so
 *.dylib
+*.asm
 build/
 
 # IDE
