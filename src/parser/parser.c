@@ -1,9 +1,16 @@
 #include "parser.h"
 
+/** Current token being parsed */
 static Token *current_token;
 
+/** Forward declaration for recursive parsing */
 static Node *parse_expression();
 
+/**
+ * @brief Creates a new AST node
+ * @param type Type of node to create
+ * @return Newly allocated node
+ */
 static Node *create_node(NodeType type) {
   Node *node = malloc(sizeof(Node));
   node->type = type;
@@ -12,6 +19,10 @@ static Node *create_node(NodeType type) {
   return node;
 }
 
+/**
+ * @brief Parses an integer literal
+ * @return AST node for integer literal
+ */
 static Node *parse_int_literal() {
   Node *node = create_node(NODE_INT_LITERAL);
   node->int_literal.value = atoi(current_token->value);
@@ -19,6 +30,10 @@ static Node *parse_int_literal() {
   return node;
 }
 
+/**
+ * @brief Parses an identifier
+ * @return AST node for identifier
+ */
 static Node *parse_identifier() {
   Node *node = create_node(NODE_IDENTIFIER);
   size_t len = strlen(current_token->value);
@@ -29,6 +44,10 @@ static Node *parse_identifier() {
   return node;
 }
 
+/**
+ * @brief Parses a string literal
+ * @return AST node for string literal
+ */
 static Node *parse_string_literal() {
   Node *node = create_node(NODE_STRING_LITERAL);
   size_t len = strlen(current_token->value);
@@ -39,6 +58,10 @@ static Node *parse_string_literal() {
   return node;
 }
 
+/**
+ * @brief Parses a primary expression (literals, identifiers, parenthesized expressions)
+ * @return AST node for primary expression
+ */
 static Node *parse_primary() {
   if (current_token->type == INT) {
     return parse_int_literal();
@@ -60,6 +83,10 @@ static Node *parse_primary() {
   exit(1);
 }
 
+/**
+ * @brief Parses an expression with binary operations
+ * @return AST node for expression
+ */
 static Node *parse_expression() {
   Node *left = parse_primary();
 
@@ -79,6 +106,10 @@ static Node *parse_expression() {
   return left;
 }
 
+/**
+ * @brief Parses a return statement
+ * @return AST node for return statement
+ */
 static Node *parse_return() {
   Node *node = create_node(NODE_RETURN);
   current_token++;
@@ -106,6 +137,10 @@ static Node *parse_return() {
   return node;
 }
 
+/**
+ * @brief Parses a variable declaration
+ * @return AST node for variable declaration
+ */
 static Node *parse_var_decl() {
   Node *node = create_node(NODE_VAR_DECL);
   size_t len = strlen(current_token->value);
@@ -138,6 +173,10 @@ static Node *parse_var_decl() {
   return node;
 }
 
+/**
+ * @brief Parses a print statement
+ * @return AST node for print statement
+ */
 static Node *parse_print() {
   Node *node = create_node(NODE_PRINT);
   current_token++;

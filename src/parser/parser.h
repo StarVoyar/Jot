@@ -8,82 +8,97 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * @brief Enumeration of AST node types
+ */
 typedef enum {
-  NODE_FUNCTION,
-  NODE_VAR_DECL,
-  NODE_ARRAY_DECL,
-  NODE_IF,
-  NODE_WHILE,
-  NODE_FOR,
-  NODE_PRINT,
-  NODE_RETURN,
-  NODE_BINARY_OP,
-  NODE_IDENTIFIER,
-  NODE_INT_LITERAL,
-  NODE_STRING_LITERAL,
-  NODE_ARRAY_LITERAL
+  NODE_FUNCTION,      /**< Function definition */
+  NODE_VAR_DECL,      /**< Variable declaration */
+  NODE_ARRAY_DECL,    /**< Array declaration */
+  NODE_IF,            /**< If/else statement */
+  NODE_WHILE,         /**< While loop */
+  NODE_FOR,           /**< For loop */
+  NODE_PRINT,         /**< Print statement */
+  NODE_RETURN,        /**< Return statement */
+  NODE_BINARY_OP,     /**< Binary operation */
+  NODE_IDENTIFIER,    /**< Identifier reference */
+  NODE_INT_LITERAL,   /**< Integer literal */
+  NODE_STRING_LITERAL, /**< String literal */
+  NODE_ARRAY_LITERAL  /**< Array literal */
 } NodeType;
 
+/**
+ * @brief Abstract Syntax Tree node
+ */
 typedef struct Node {
-  NodeType type;
-  struct Node *left;
-  struct Node *right;
+  NodeType type; /**< Type of the node */
+  struct Node *left; /**< Left child (for binary ops, statement lists) */
+  struct Node *right; /**< Right child (for binary ops, statement lists) */
   union {
     struct {
-      char *name;
-      struct Node *body;
+      char *name; /**< Function name */
+      struct Node *body; /**< Function body */
     } function;
     struct {
-      char *var_type;
-      char *name;
-      struct Node *value;
+      char *var_type; /**< Variable type (int, bool, string, char) */
+      char *name; /**< Variable name */
+      struct Node *value; /**< Initial value (optional) */
     } var_decl;
     struct {
-      char *name;
-      struct Node *elements;
+      char *name; /**< Array name */
+      struct Node *elements; /**< Array elements */
     } array_decl;
     struct {
-      struct Node *condition;
-      struct Node *body;
-      struct Node *else_body;
+      struct Node *condition; /**< If condition */
+      struct Node *body; /**< If body */
+      struct Node *else_body; /**< Else body (optional) */
     } if_stmt;
     struct {
-      struct Node *condition;
-      struct Node *body;
+      struct Node *condition; /**< While condition */
+      struct Node *body; /**< While body */
     } while_stmt;
     struct {
-      char *var_name;
-      char *array_name;
-      struct Node *body;
+      char *var_name; /**< Loop variable name */
+      char *array_name; /**< Array to iterate over */
+      struct Node *body; /**< Loop body */
     } for_stmt;
     struct {
-      struct Node *value;
+      struct Node *value; /**< Value to print */
     } print_stmt;
     struct {
-      struct Node *value;
+      struct Node *value; /**< Return value */
     } return_stmt;
     struct {
-      char *operator;
-      struct Node *left;
-      struct Node *right;
+      char *operator; /**< Operator string (+, -, *, /, ==, etc.) */
+      struct Node *left; /**< Left operand */
+      struct Node *right; /**< Right operand */
     } binary_op;
     struct {
-      char *name;
+      char *name; /**< Identifier name */
     } identifier;
     struct {
-      int value;
+      int value; /**< Integer value */
     } int_literal;
     struct {
-      char *value;
+      char *value; /**< String value */
     } string_literal;
     struct {
-      struct Node *elements;
+      struct Node *elements; /**< Array elements */
     } array_literal;
   };
 } Node;
 
+/**
+ * @brief Parses tokens into an Abstract Syntax Tree
+ * @param tokens Array of tokens to parse
+ * @return Root node of the AST (linked list of statements)
+ */
 Node *Parser(Token *tokens);
 
+/**
+ * @brief Prints the AST structure for debugging
+ * @param root Root node of the AST to print
+ */
 void print_tree(Node *root);
 
 #endif

@@ -1,8 +1,16 @@
 #include "lexer.h"
 
+/** Global buffer holding the source file contents */
 static char *global_buffer;
+
+/** Index tracking the current token position in the token array */
 size_t tokens_index = 0;
 
+/**
+ * @brief Lexes a source file into a stream of tokens
+ * @param file Source file to lex
+ * @return Array of tokens terminated by END_OF_TOKENS
+ */
 Token *Lexer(FILE *file) {
   fseek(file, 0, SEEK_END);
   long length = ftell(file);
@@ -94,6 +102,12 @@ Token *Lexer(FILE *file) {
   return tokens;
 }
 
+/**
+ * @brief Lexes an integer literal
+ * @param current_char Starting character
+ * @param current_index Current position in buffer (updated)
+ * @return Token for integer literal
+ */
 Token *lex_int(char current_char, int *current_index) {
   Token *token = malloc(sizeof(Token));
   token->type = INT;
@@ -117,6 +131,12 @@ Token *lex_int(char current_char, int *current_index) {
   return token;
 }
 
+/**
+ * @brief Lexes a keyword or identifier
+ * @param current_char Starting character
+ * @param current_index Current position in buffer (updated)
+ * @return Token for keyword or identifier
+ */
 Token *lex_keyword(char current_char, int *current_index) {
   Token *token = malloc(sizeof(Token));
   char keyword[32];
@@ -152,6 +172,11 @@ Token *lex_keyword(char current_char, int *current_index) {
   return token;
 }
 
+/**
+ * @brief Lexes a separator character
+ * @param character Separator character
+ * @return Token for separator
+ */
 Token *lex_separator(char character) {
   Token *token = malloc(sizeof(Token));
   char separator[2] = {character, '\0'};
@@ -161,6 +186,12 @@ Token *lex_separator(char character) {
   return token;
 }
 
+/**
+ * @brief Lexes an operator (including multi-character operators)
+ * @param character Starting character
+ * @param current_index Current position in buffer (updated)
+ * @return Token for operator
+ */
 Token *lex_operator(char character, int *current_index) {
   Token *token = malloc(sizeof(Token));
   char op[3] = {character, '\0', '\0'};
@@ -181,6 +212,11 @@ Token *lex_operator(char character, int *current_index) {
   return token;
 }
 
+/**
+ * @brief Lexes a string literal
+ * @param current_index Current position in buffer (updated)
+ * @return Token for string literal
+ */
 Token *lex_string(int *current_index) {
   Token *token = malloc(sizeof(Token));
   (*current_index)++;
@@ -206,6 +242,11 @@ Token *lex_string(int *current_index) {
   return token;
 }
 
+/**
+ * @brief Lexes an unknown character
+ * @param character Unknown character
+ * @return Token for unknown character
+ */
 Token *lex_unknown(char character) {
   Token *token = malloc(sizeof(Token));
   char unknown[2] = {character, '\0'};
@@ -215,6 +256,10 @@ Token *lex_unknown(char character) {
   return token;
 }
 
+/**
+ * @brief Prints a token's type and value
+ * @param token Token to print
+ */
 void print_token(Token token) {
   printf("Token Value: ");
   printf("'");
@@ -250,6 +295,10 @@ void print_token(Token token) {
   }
 }
 
+/**
+ * @brief Frees memory allocated for token array
+ * @param tokens Token array to free
+ */
 void free_tokens(Token *tokens) {
   if (tokens == NULL)
     return;
