@@ -39,7 +39,7 @@ Token *Lexer(FILE *file) {
       tokens[tokens_index] = *token;
       tokens_index++;
       free(token);
-    } else if (isalpha(character)) {
+    } else if (isalpha(character) || character == '_') {
       Token *token = lex_keyword(character, &current_index);
       tokens[tokens_index] = *token;
       tokens_index++;
@@ -145,7 +145,7 @@ Token *lex_int(char current_char, int *current_index) {
 }
 
 /**
- * @brief Lexes a keyword or identifier
+ * @brief Lexes a keyword or identifier (digits allowed after first char)
  * @param current_char Starting character
  * @param current_index Current position in buffer (updated)
  * @return Token for keyword or identifier
@@ -155,7 +155,7 @@ Token *lex_keyword(char current_char, int *current_index) {
   char keyword[32];
   int keyword_index = 0;
 
-  while ((isalpha(current_char) || current_char == '_') &&
+  while ((isalnum(current_char) || current_char == '_') &&
          current_char != '\0' && keyword_index < 31) {
     keyword[keyword_index++] = current_char;
     (*current_index)++;
