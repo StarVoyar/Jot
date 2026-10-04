@@ -10,14 +10,14 @@
  * @brief Enumeration of token types
  */
 typedef enum {
-  INT,         /**< Integer literal */
-  IDENTIFIER,  /**< Variable or function name */
-  KEYWORD,     /**< Language keyword */
-  OPERATOR,    /**< Arithmetic or comparison operator */
-  STRING,      /**< String literal */
-  SEPARATOR,   /**< Punctuation and delimiters */
+  INT,           /**< Integer literal */
+  IDENTIFIER,    /**< Variable or function name */
+  KEYWORD,       /**< Language keyword */
+  OPERATOR,      /**< Arithmetic or comparison operator */
+  STRING,        /**< String literal */
+  SEPARATOR,     /**< Punctuation and delimiters */
   END_OF_TOKENS, /**< End of token stream */
-  UNKNOWN,     /**< Unrecognized token */
+  UNKNOWN,       /**< Unrecognized token */
 } TokenType;
 
 /**
