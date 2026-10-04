@@ -5,6 +5,7 @@
 *.a
 *.so
 *.dylib
+build/
 
 # IDE
 .vscode/
