@@ -26,8 +26,11 @@ static int var_count;
 /** Reserved stack bytes for locals */
 static int frame_size;
 
-/** Non-zero while generating fn main (returns exit the process) */
-static int in_main;
+/** Non-zero while generating a function body (returns use ret) */
+static int in_function;
+
+/** Non-zero if the program defines fn main (it lives at jot_main) */
+static int has_user_main;
 
 /** Forward declaration for recursive generation */
 static void gen_expression(Node *node);
@@ -309,6 +312,18 @@ static void gen_prologue() {
 }
 
 /**
+ * @brief Maps a Jot function name to its assembly label
+ * @param name Function name from source
+ * @return Assembly label (fn main lives at jot_main, entry stays main)
+ */
+static const char *func_label(const char *name) {
+  if (has_user_main && strcmp(name, "main") == 0) {
+    return "jot_main";
+  }
+  return name;
+}
+
+/**
  * @brief Generates code for a function call, result left in rax
  * @param node Call node to generate
  */
@@ -329,7 +344,7 @@ static void gen_call(Node *node) {
     i++;
   }
   fprintf(out, "  sub rsp, 32\n");
-  fprintf(out, "  call %s\n", node->func_call.name);
+  fprintf(out, "  call %s\n", func_label(node->func_call.name));
   fprintf(out, "  add rsp, 32\n");
 }
 
@@ -617,14 +632,14 @@ static void gen_statement(Node *node) {
   }
   case NODE_RETURN: {
     gen_expression(node->return_stmt.value);
-    if (in_main) {
-      fprintf(out, "  mov rcx, rax\n");
-      fprintf(out, "  sub rsp, 32\n");
-      fprintf(out, "  call exit\n");
-    } else {
+    if (in_function) {
       fprintf(out, "  mov rsp, rbp\n");
       fprintf(out, "  pop rbp\n");
       fprintf(out, "  ret\n");
+    } else {
+      fprintf(out, "  mov rcx, rax\n");
+      fprintf(out, "  sub rsp, 32\n");
+      fprintf(out, "  call exit\n");
     }
     break;
   }
@@ -684,16 +699,11 @@ static void gen_statement(Node *node) {
 static void gen_function(Node *node) {
   const char *name = node->function.name;
   int saved_count = var_count;
-  int saved_main = in_main;
+  int saved_in_function = in_function;
   var_count = 0;
+  in_function = 1;
 
-  if (strcmp(name, "main") == 0) {
-    in_main = 1;
-  } else {
-    in_main = 0;
-  }
-
-  fprintf(out, "%s:\n", name);
+  fprintf(out, "%s:\n", func_label(name));
   gen_prologue();
 
   int param_index = 0;
@@ -720,31 +730,35 @@ static void gen_function(Node *node) {
 
   gen_block(node->function.body);
 
-  if (strcmp(name, "main") == 0) {
-    fprintf(out, "  xor ecx, ecx\n");
-    fprintf(out, "  sub rsp, 32\n");
-    fprintf(out, "  call exit\n");
-  } else {
-    fprintf(out, "  mov rsp, rbp\n");
-    fprintf(out, "  pop rbp\n");
-    fprintf(out, "  ret\n");
-  }
+  fprintf(out, "  mov rsp, rbp\n");
+  fprintf(out, "  pop rbp\n");
+  fprintf(out, "  ret\n");
 
   var_count = saved_count;
-  in_main = saved_main;
+  in_function = saved_in_function;
 }
 
 /**
  * @brief Generates NASM x86-64 assembly for a Jot program
  * @param root Root of the AST (linked list of top level statements)
  * @param filename Output assembly file path
+ * @details Entry point main runs the top level statements only.
+ * Functions (including fn main, emitted as jot_main) run when called.
  */
 void GenerateAssembly(Node *root, const char *filename) {
   label_id = 0;
   string_count = 0;
   var_count = 0;
   frame_size = 256;
-  in_main = 1;
+  in_function = 0;
+  has_user_main = 0;
+
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_FUNCTION && strcmp(s->function.name, "main") == 0) {
+      has_user_main = 1;
+      break;
+    }
+  }
 
   collect_strings(root);
 
@@ -760,37 +774,21 @@ void GenerateAssembly(Node *root, const char *filename) {
   gen_data_section();
   fprintf(out, "section .text\n");
 
-  Node *main_fn = NULL;
+  fprintf(out, "main:\n");
+  gen_prologue();
   for (Node *s = root; s != NULL; s = s->right) {
-    if (s->type == NODE_FUNCTION && strcmp(s->function.name, "main") == 0) {
-      main_fn = s;
-      break;
+    if (s->type != NODE_FUNCTION) {
+      gen_statement(s);
     }
   }
+  fprintf(out, "  xor ecx, ecx\n");
+  fprintf(out, "  sub rsp, 32\n");
+  fprintf(out, "  call exit\n");
 
-  if (main_fn != NULL) {
-    gen_function(main_fn);
-    for (Node *s = root; s != NULL; s = s->right) {
-      if (s->type == NODE_FUNCTION) {
-        if (s != main_fn) {
-          gen_function(s);
-        }
-      } else if (s->type == NODE_FUNC_CALL) {
-        if (strcmp(s->func_call.name, "main") != 0) {
-          fprintf(out, "global _top_call%d\n", label_id);
-        }
-      } else {
-        printf("Error: Top level statements outside fn main not supported\n");
-        exit(1);
-      }
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_FUNCTION) {
+      gen_function(s);
     }
-  } else {
-    fprintf(out, "main:\n");
-    gen_prologue();
-    gen_block(root);
-    fprintf(out, "  xor ecx, ecx\n");
-    fprintf(out, "  sub rsp, 32\n");
-    fprintf(out, "  call exit\n");
   }
 
   fclose(out);
