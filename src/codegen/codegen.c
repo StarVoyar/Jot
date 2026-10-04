@@ -45,7 +45,7 @@ static void gen_statement(Node *node);
 static void gen_block(Node *list);
 
 /** Source file name for error messages */
-static const char *codegen_filename;
+static const char *codegen_source;
 
 /**
  * @brief Prints a modern error for an AST node and exits
@@ -72,7 +72,7 @@ static NORETURN void codegen_error(Node *node, const char *format, ...) {
       width = node->width;
     }
   }
-  term_report(TERM_ERROR, codegen_filename, line, col, width, message);
+  term_report(TERM_ERROR, codegen_source, line, col, width, message);
   exit(1);
 }
 
@@ -843,8 +843,8 @@ static void gen_function(Node *node) {
  * @details Entry point main runs the top level statements only.
  * Functions (including fn main, emitted as jot_main) run when called.
  */
-void GenerateAssembly(Node *root, const char *filename) {
-  codegen_filename = filename;
+void GenerateAssembly(Node *root, const char *source, const char *output) {
+  codegen_source = source;
   label_id = 0;
   string_count = 0;
   var_count = 0;
@@ -861,9 +861,9 @@ void GenerateAssembly(Node *root, const char *filename) {
 
   collect_strings(root);
 
-  out = fopen(filename, "w");
+  out = fopen(output, "w");
   if (!out) {
-    codegen_error(NULL, "Could not open output file '%s'", filename);
+    codegen_error(NULL, "Could not open output file '%s'", output);
   }
 
   fprintf(out, "global main\n");

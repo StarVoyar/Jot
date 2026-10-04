@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
     out_file = default_out;
   }
 
-  GenerateAssembly(ast, out_file);
+  GenerateAssembly(ast, argv[1], out_file);
   if (debug) {
     printf("Assembly written to '%s'\n", out_file);
   }

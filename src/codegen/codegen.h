@@ -12,8 +12,9 @@
 /**
  * @brief Generates NASM x86-64 assembly for a Jot program
  * @param root Root of the AST (linked list of top level statements)
- * @param filename Output assembly file path
+ * @param source Source file path used in error messages
+ * @param output Output assembly file path
  */
-void GenerateAssembly(Node *root, const char *filename);
+void GenerateAssembly(Node *root, const char *source, const char *output);
 
 #endif

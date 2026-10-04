@@ -19,7 +19,7 @@ Working end-to-end compiler: lexer (tokens) → parser (AST) → codegen (`.asm`
 - **Print**: `print(x);` for values, `print("x={x}\n");` with `{name}` interpolation
 - **Return**: `return(v);` returns from a function (`rax`), top-level `return(v);` exits the process with code `v`
 - **Comments**: Single-line comments (`//`)
-- **Diagnostics**: clang-style errors (red `Error:`, `file:line:col`, source snippet, `^` / red `~~~`) and yellow `Warning:`s (e.g. unreachable code after `return`, which still compiles)
+- **Diagnostics**: clang-style errors (red `Error:`, `file:line:col`, source snippet, `^` / red `~~~`) and yellow `Warning:`s (e.g. unreachable code after `return`, which still compiles). A missing delimiter points where the token belongs when the offender starts a new line, otherwise at the offender like gcc
 
 ## Building
 

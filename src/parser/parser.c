@@ -34,6 +34,53 @@ static int token_width() {
   }
   return 1;
 }
+/**
+ * @brief Checks if a position starts its line (only whitespace before it)
+ * @param line 1-based line number
+ * @param col 1-based column number
+ * @return Non-zero if nothing but whitespace precedes the position
+ */
+static int is_first_on_line(int line, int col) {
+  int text_len = 0;
+  const char *text = lexer_source_line(line, &text_len);
+  if (text == NULL) {
+    return 0;
+  }
+  int i = 0;
+  while (i < col - 1 && i < text_len &&
+         (text[i] == ' ' || text[i] == '\t' || text[i] == '\r')) {
+    i++;
+  }
+  return i == col - 1;
+}
+
+/**
+ * @brief Moves a position back to the end of the previous code line
+ * @param line Current line, updated in place
+ * @param col Current column, updated in place
+ * @return Non-zero if placed at the end of real code
+ */
+static int step_to_prev_code_end(int *line, int *col) {
+  int probe_len = 0;
+  while (*line > 1) {
+    const char *probe_text = lexer_source_line(*line - 1, &probe_len);
+    if (probe_text == NULL) {
+      break;
+    }
+    int i = 0;
+    while (i < probe_len && (probe_text[i] == ' ' || probe_text[i] == '\t' ||
+                             probe_text[i] == '\r')) {
+      i++;
+    }
+    if (i < probe_len) {
+      (*line)--;
+      *col = probe_len + 1;
+      return 1;
+    }
+    (*line)--;
+  }
+  return 0;
+}
 
 /**
  * @brief Prints a clang-style error with source context and exits
@@ -49,25 +96,8 @@ static NORETURN void parse_error(const char *message) {
     col = 1;
   }
 
-  if (current_token->type == END_OF_TOKENS) {
-    int probe_len = 0;
-    while (line > 1) {
-      const char *probe_text = lexer_source_line(line - 1, &probe_len);
-      if (probe_text == NULL) {
-        break;
-      }
-      int i = 0;
-      while (i < probe_len && (probe_text[i] == ' ' || probe_text[i] == '\t' ||
-                               probe_text[i] == '\r')) {
-        i++;
-      }
-      if (i < probe_len) {
-        line--;
-        col = probe_len + 1;
-        break;
-      }
-      line--;
-    }
+  if (current_token->type == END_OF_TOKENS && is_first_on_line(line, col)) {
+    step_to_prev_code_end(&line, &col);
   }
 
   term_report(TERM_ERROR, source_filename, line, col, token_width(), message);
@@ -75,12 +105,75 @@ static NORETURN void parse_error(const char *message) {
 }
 
 /**
- * @brief Prints a gcc-style warning with source context
+ * @brief Prints an expected-token error, favouring the insertion point
+ * @param message Error message without the Error: prefix
+ * @details If the offending token starts its line, the missing token
+ * almost certainly belongs at the end of the previous code line, so
+ * the caret goes there instead of at the offender.
+ */
+static NORETURN void parse_error_expected(const char *message) {
+  int line = current_token->line;
+  int col = current_token->col;
+  if (line < 1) {
+    line = 1;
+  }
+  if (col < 1) {
+    col = 1;
+  }
+
+  int width = token_width();
+  if (is_first_on_line(line, col)) {
+    if (step_to_prev_code_end(&line, &col)) {
+      width = 1;
+    }
+  }
+
+  term_report(TERM_ERROR, source_filename, line, col, width, message);
+  exit(1);
+}
+
+/**
+ * @brief Display width from a position to the end of its line
+ * @param line 1-based line number
+ * @param col 1-based column number
+ * @return Display width, at least 1
+ */
+static int line_rest_width(int line, int col) {
+  int text_len = 0;
+  const char *text = lexer_source_line(line, &text_len);
+  if (text == NULL) {
+    return 1;
+  }
+  int start = 0;
+  for (int i = 0; i < col - 1 && i < text_len; i++) {
+    if (text[i] == '\t') {
+      start = ((start / 4) + 1) * 4;
+    } else {
+      start++;
+    }
+  }
+  int end = start;
+  for (int i = col - 1; i < text_len; i++) {
+    if (text[i] == '\t') {
+      end = ((end / 4) + 1) * 4;
+    } else {
+      end++;
+    }
+  }
+  if (end <= start) {
+    return 1;
+  }
+  return end - start;
+}
+
+/**
+ * @brief Prints a gcc-style warning spanning the rest of the line
  * @param message Warning message without the Warning: prefix
  */
 static void parse_warning(const char *message) {
-  term_report(TERM_WARNING, source_filename, current_token->line,
-              current_token->col, token_width(), message);
+  term_report(
+      TERM_WARNING, source_filename, current_token->line, current_token->col,
+      line_rest_width(current_token->line, current_token->col), message);
 }
 
 /**
@@ -155,7 +248,7 @@ static Node *parse_member_access(Node *object) {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error("Expected member name after '.'\n");
+    parse_error_expected("Expected member name after '.'\n");
   }
   len = strlen(current_token->value);
   node->member_access.member = malloc(len + 1);
@@ -183,7 +276,7 @@ static Node *parse_func_call_expr() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after function name\n");
+    parse_error_expected("Expected '(' after function name\n");
   }
   current_token++;
 
@@ -212,7 +305,7 @@ static Node *parse_func_call_expr() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after function call\n");
+    parse_error_expected("Expected ')' after function call\n");
   }
   current_token++;
 
@@ -248,7 +341,7 @@ static Node *parse_primary() {
     Node *expr = parse_expression();
     if (current_token->type == END_OF_TOKENS ||
         strcmp(current_token->value, ")") != 0) {
-      parse_error("Expected closing parenthesis\n");
+      parse_error_expected("Expected closing parenthesis\n");
     }
     current_token++;
     return expr;
@@ -281,7 +374,7 @@ static Node *parse_primary() {
 
     if (current_token->type == END_OF_TOKENS ||
         strcmp(current_token->value, "]") != 0) {
-      parse_error("Expected ']' after array literal\n");
+      parse_error_expected("Expected ']' after array literal\n");
     }
     current_token++;
     return node;
@@ -322,7 +415,7 @@ static Node *parse_return() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after return\n");
+    parse_error_expected("Expected '(' after return\n");
   }
   current_token++;
 
@@ -330,13 +423,13 @@ static Node *parse_return() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after return value\n");
+    parse_error_expected("Expected ')' after return value\n");
   }
   current_token++;
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    parse_error("Expected ';' after return statement\n");
+    parse_error_expected("Expected ';' after return statement\n");
   }
   current_token++;
 
@@ -356,7 +449,7 @@ static Node *parse_var_decl() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error("Expected identifier after type\n");
+    parse_error_expected("Expected identifier after type\n");
   }
   len = strlen(current_token->value);
   node->var_decl.name = malloc(len + 1);
@@ -374,7 +467,7 @@ static Node *parse_var_decl() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    parse_error("Expected ';' after variable declaration\n");
+    parse_error_expected("Expected ';' after variable declaration\n");
   }
   current_token++;
 
@@ -395,7 +488,7 @@ static Node *parse_assignment() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "=") != 0) {
-    parse_error("Expected '=' after identifier\n");
+    parse_error_expected("Expected '=' after identifier\n");
   }
   current_token++;
 
@@ -403,7 +496,7 @@ static Node *parse_assignment() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    parse_error("Expected ';' after assignment\n");
+    parse_error_expected("Expected ';' after assignment\n");
   }
   current_token++;
 
@@ -447,7 +540,7 @@ static Node *parse_print() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after print\n");
+    parse_error_expected("Expected '(' after print\n");
   }
   current_token++;
 
@@ -455,13 +548,13 @@ static Node *parse_print() {
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after print value\n");
+    parse_error_expected("Expected ')' after print value\n");
   }
   current_token++;
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
-    parse_error("Expected ';' after print statement\n");
+    parse_error_expected("Expected ';' after print statement\n");
   }
   current_token++;
 
@@ -477,26 +570,26 @@ static Node *parse_if() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after if\n");
+    parse_error_expected("Expected '(' after if\n");
   }
   current_token++;
 
   node->if_stmt.condition = parse_expression();
 
   if (strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after if condition\n");
+    parse_error_expected("Expected ')' after if condition\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    parse_error("Expected '{' after if condition\n");
+    parse_error_expected("Expected '{' after if condition\n");
   }
   current_token++;
 
   node->if_stmt.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    parse_error("Expected '}' after if body\n");
+    parse_error_expected("Expected '}' after if body\n");
   }
   current_token++;
 
@@ -508,12 +601,12 @@ static Node *parse_if() {
       node->if_stmt.else_body = parse_if();
     } else {
       if (strcmp(current_token->value, "{") != 0) {
-        parse_error("Expected '{' after else\n");
+        parse_error_expected("Expected '{' after else\n");
       }
       current_token++;
       node->if_stmt.else_body = parse_block_statements();
       if (strcmp(current_token->value, "}") != 0) {
-        parse_error("Expected '}' after else body\n");
+        parse_error_expected("Expected '}' after else body\n");
       }
       current_token++;
     }
@@ -533,26 +626,26 @@ static Node *parse_while() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after while\n");
+    parse_error_expected("Expected '(' after while\n");
   }
   current_token++;
 
   node->while_stmt.condition = parse_expression();
 
   if (strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after while condition\n");
+    parse_error_expected("Expected ')' after while condition\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    parse_error("Expected '{' after while condition\n");
+    parse_error_expected("Expected '{' after while condition\n");
   }
   current_token++;
 
   node->while_stmt.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    parse_error("Expected '}' after while body\n");
+    parse_error_expected("Expected '}' after while body\n");
   }
   current_token++;
 
@@ -568,12 +661,12 @@ static Node *parse_for() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after for\n");
+    parse_error_expected("Expected '(' after for\n");
   }
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error("Expected identifier in for loop\n");
+    parse_error_expected("Expected identifier in for loop\n");
   }
   size_t len = strlen(current_token->value);
   node->for_stmt.var_name = malloc(len + 1);
@@ -582,12 +675,12 @@ static Node *parse_for() {
   current_token++;
 
   if (strcmp(current_token->value, "in") != 0) {
-    parse_error("Expected 'in' in for loop\n");
+    parse_error_expected("Expected 'in' in for loop\n");
   }
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error("Expected array identifier in for loop\n");
+    parse_error_expected("Expected array identifier in for loop\n");
   }
   len = strlen(current_token->value);
   node->for_stmt.array_name = malloc(len + 1);
@@ -596,19 +689,19 @@ static Node *parse_for() {
   current_token++;
 
   if (strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after for loop declaration\n");
+    parse_error_expected("Expected ')' after for loop declaration\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    parse_error("Expected '{' after for loop\n");
+    parse_error_expected("Expected '{' after for loop\n");
   }
   current_token++;
 
   node->for_stmt.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    parse_error("Expected '}' after for body\n");
+    parse_error_expected("Expected '}' after for body\n");
   }
   current_token++;
 
@@ -624,7 +717,7 @@ static Node *parse_array_decl() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error("Expected identifier after array\n");
+    parse_error_expected("Expected identifier after array\n");
   }
   size_t len = strlen(current_token->value);
   node->array_decl.name = malloc(len + 1);
@@ -633,12 +726,12 @@ static Node *parse_array_decl() {
   current_token++;
 
   if (strcmp(current_token->value, "=") != 0) {
-    parse_error("Expected '=' after array name\n");
+    parse_error_expected("Expected '=' after array name\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "[") != 0) {
-    parse_error("Expected '[' for array literal\n");
+    parse_error_expected("Expected '[' for array literal\n");
   }
   current_token++;
 
@@ -667,12 +760,12 @@ static Node *parse_array_decl() {
   }
 
   if (strcmp(current_token->value, "]") != 0) {
-    parse_error("Expected ']' after array elements\n");
+    parse_error_expected("Expected ']' after array elements\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, ";") != 0) {
-    parse_error("Expected ';' after array declaration\n");
+    parse_error_expected("Expected ';' after array declaration\n");
   }
   current_token++;
 
@@ -688,7 +781,7 @@ static Node *parse_function() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error("Expected function name\n");
+    parse_error_expected("Expected function name\n");
   }
   size_t len = strlen(current_token->value);
   node->function.name = malloc(len + 1);
@@ -697,7 +790,7 @@ static Node *parse_function() {
   current_token++;
 
   if (strcmp(current_token->value, "(") != 0) {
-    parse_error("Expected '(' after function name\n");
+    parse_error_expected("Expected '(' after function name\n");
   }
   current_token++;
 
@@ -721,7 +814,8 @@ static Node *parse_function() {
         param->var_decl.var_type[len] = '\0';
         current_token++;
         if (current_token->type != IDENTIFIER) {
-          parse_error("Expected identifier after type in parameter list\n");
+          parse_error_expected(
+              "Expected identifier after type in parameter list\n");
         }
         len = strlen(current_token->value);
         param->var_decl.name = malloc(len + 1);
@@ -737,7 +831,7 @@ static Node *parse_function() {
         param->identifier.name[len] = '\0';
         current_token++;
       } else {
-        parse_error("Expected parameter in function definition\n");
+        parse_error_expected("Expected parameter in function definition\n");
       }
 
       if (node->function.params == NULL) {
@@ -758,19 +852,19 @@ static Node *parse_function() {
   }
 
   if (strcmp(current_token->value, ")") != 0) {
-    parse_error("Expected ')' after function parameters\n");
+    parse_error_expected("Expected ')' after function parameters\n");
   }
   current_token++;
 
   if (strcmp(current_token->value, "{") != 0) {
-    parse_error("Expected '{' after function declaration\n");
+    parse_error_expected("Expected '{' after function declaration\n");
   }
   current_token++;
 
   node->function.body = parse_block_statements();
 
   if (strcmp(current_token->value, "}") != 0) {
-    parse_error("Expected '}' after function body\n");
+    parse_error_expected("Expected '}' after function body\n");
   }
   current_token++;
 
@@ -809,7 +903,7 @@ static Node *parse_statement() {
       Node *call = parse_func_call_expr();
       if (current_token->type == END_OF_TOKENS ||
           strcmp(current_token->value, ";") != 0) {
-        parse_error("Expected ';' after function call\n");
+        parse_error_expected("Expected ';' after function call\n");
       }
       current_token++;
       return call;
