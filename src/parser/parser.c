@@ -262,6 +262,12 @@ static void collect_calls(Node *node, Node **out_calls, int *out_count,
     case NODE_ASSIGNMENT:
       collect_calls(s->assignment.value, out_calls, out_count, cap);
       break;
+    case NODE_ADD_ASSIGN:
+      collect_calls(s->add_assign.value, out_calls, out_count, cap);
+      break;
+    case NODE_SUB_ASSIGN:
+      collect_calls(s->sub_assign.value, out_calls, out_count, cap);
+      break;
     case NODE_ARRAY_LITERAL:
       collect_calls(s->array_literal.elements, out_calls, out_count, cap);
       break;
@@ -463,6 +469,17 @@ static Node *parse_int_literal() {
 }
 
 /**
+ * @brief Parses a floating point literal
+ * @return AST node for floating point literal
+ */
+static Node *parse_float_literal() {
+  Node *node = create_node(NODE_FLOAT_LITERAL);
+  node->float_literal.value = atof(current_token->value);
+  current_token++;
+  return node;
+}
+
+/**
  * @brief Parses an identifier
  * @return AST node for identifier
  */
@@ -579,6 +596,8 @@ static Node *parse_primary() {
   }
   if (current_token->type == INT) {
     return parse_int_literal();
+  } else if (current_token->type == FLOAT) {
+    return parse_float_literal();
   } else if (current_token->type == IDENTIFIER) {
     if (current_token[1].value != NULL &&
         strcmp(current_token[1].value, "(") == 0) {
@@ -816,24 +835,41 @@ static Node *parse_var_decl() {
 }
 
 /**
- * @brief Parses an assignment statement
+ * @brief Parses an assignment statement (including += and -=)
  * @return AST node for assignment statement
  */
 static Node *parse_assignment() {
-  Node *node = create_node(NODE_ASSIGNMENT);
   size_t len = strlen(current_token->value);
-  node->assignment.name = malloc(len + 1);
-  memcpy(node->assignment.name, current_token->value, len);
-  node->assignment.name[len] = '\0';
+  char *name = malloc(len + 1);
+  memcpy(name, current_token->value, len);
+  name[len] = '\0';
   current_token++;
 
-  if (current_token->type == END_OF_TOKENS ||
-      strcmp(current_token->value, "=") != 0) {
-    parse_error_expected("Expected '=' after identifier\n");
+  if (current_token->type == END_OF_TOKENS) {
+    free(name);
+    parse_error_expected("Expected assignment operator after identifier\n");
   }
-  current_token++;
 
-  node->assignment.value = parse_expression();
+  Node *node;
+  if (strcmp(current_token->value, "+=") == 0) {
+    node = create_node(NODE_ADD_ASSIGN);
+    node->add_assign.name = name;
+    current_token++;
+    node->add_assign.value = parse_expression();
+  } else if (strcmp(current_token->value, "-=") == 0) {
+    node = create_node(NODE_SUB_ASSIGN);
+    node->sub_assign.name = name;
+    current_token++;
+    node->sub_assign.value = parse_expression();
+  } else if (strcmp(current_token->value, "=") == 0) {
+    node = create_node(NODE_ASSIGNMENT);
+    node->assignment.name = name;
+    current_token++;
+    node->assignment.value = parse_expression();
+  } else {
+    free(name);
+    parse_error_expected("Expected '=', '+=', or '-=' after identifier\n");
+  }
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
@@ -1208,6 +1244,9 @@ static Node *clone_node(Node *node) {
   case NODE_INT_LITERAL:
     copy->int_literal.value = node->int_literal.value;
     break;
+  case NODE_FLOAT_LITERAL:
+    copy->float_literal.value = node->float_literal.value;
+    break;
   case NODE_STRING_LITERAL:
     len = strlen(node->string_literal.value);
     copy->string_literal.value = malloc(len + 1);
@@ -1230,6 +1269,20 @@ static Node *clone_node(Node *node) {
     memcpy(copy->assignment.name, node->assignment.name, len);
     copy->assignment.name[len] = '\0';
     copy->assignment.value = clone_node(node->assignment.value);
+    break;
+  case NODE_ADD_ASSIGN:
+    len = strlen(node->add_assign.name);
+    copy->add_assign.name = malloc(len + 1);
+    memcpy(copy->add_assign.name, node->add_assign.name, len);
+    copy->add_assign.name[len] = '\0';
+    copy->add_assign.value = clone_node(node->add_assign.value);
+    break;
+  case NODE_SUB_ASSIGN:
+    len = strlen(node->sub_assign.name);
+    copy->sub_assign.name = malloc(len + 1);
+    memcpy(copy->sub_assign.name, node->sub_assign.name, len);
+    copy->sub_assign.name[len] = '\0';
+    copy->sub_assign.value = clone_node(node->sub_assign.value);
     break;
   case NODE_MEMBER_ACCESS:
     len = strlen(node->member_access.object);
@@ -1522,7 +1575,7 @@ static Node *parse_function() {
     while (1) {
       Node *param = NULL;
       if (current_token->type == KEYWORD &&
-          (strcmp(current_token->value, "int") == 0 ||
+          (strcmp(current_token->value, "num") == 0 ||
            strcmp(current_token->value, "bool") == 0 ||
            strcmp(current_token->value, "string") == 0 ||
            strcmp(current_token->value, "array") == 0)) {
@@ -1645,7 +1698,7 @@ static Node *parse_statement() {
       return parse_for();
     } else if (strcmp(current_token->value, "print") == 0) {
       return parse_print();
-    } else if (strcmp(current_token->value, "int") == 0 ||
+    } else if (strcmp(current_token->value, "num") == 0 ||
                strcmp(current_token->value, "bool") == 0 ||
                strcmp(current_token->value, "string") == 0) {
       return parse_var_decl();
@@ -1676,7 +1729,9 @@ static Node *parse_statement() {
       current_token++;
       return call;
     } else if (current_token[1].value != NULL &&
-               strcmp(current_token[1].value, "=") == 0) {
+               (strcmp(current_token[1].value, "=") == 0 ||
+                strcmp(current_token[1].value, "+=") == 0 ||
+                strcmp(current_token[1].value, "-=") == 0)) {
       return parse_assignment();
     } else if (current_token[1].value != NULL &&
                strcmp(current_token[1].value, ".") == 0) {
@@ -1854,6 +1909,9 @@ void print_tree(Node *root) {
   case NODE_INT_LITERAL:
     printf("Int(%lld)", root->int_literal.value);
     break;
+  case NODE_FLOAT_LITERAL:
+    printf("Float(%f)", root->float_literal.value);
+    break;
   case NODE_STRING_LITERAL:
     printf("String(\"%s\")", root->string_literal.value);
     break;
@@ -1870,6 +1928,16 @@ void print_tree(Node *root) {
   case NODE_ASSIGNMENT:
     printf("Assign(%s = ", root->assignment.name);
     print_tree(root->assignment.value);
+    printf(")");
+    break;
+  case NODE_ADD_ASSIGN:
+    printf("AddAssign(%s += ", root->add_assign.name);
+    print_tree(root->add_assign.value);
+    printf(")");
+    break;
+  case NODE_SUB_ASSIGN:
+    printf("SubAssign(%s -= ", root->sub_assign.name);
+    print_tree(root->sub_assign.value);
     printf(")");
     break;
   case NODE_MEMBER_ACCESS:

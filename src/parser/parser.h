@@ -23,10 +23,13 @@ typedef enum {
   NODE_BINARY_OP,      /**< Binary operation */
   NODE_IDENTIFIER,     /**< Identifier reference */
   NODE_INT_LITERAL,    /**< Integer literal */
+  NODE_FLOAT_LITERAL,  /**< Floating point literal */
   NODE_STRING_LITERAL, /**< String literal */
   NODE_ARRAY_LITERAL,  /**< Array literal */
   NODE_FUNC_CALL,      /**< Function call */
   NODE_ASSIGNMENT,     /**< Assignment statement */
+  NODE_ADD_ASSIGN,     /**< Add and assign (+=) */
+  NODE_SUB_ASSIGN,     /**< Subtract and assign (-=) */
   NODE_MEMBER_ACCESS   /**< Member access (object.member) */
 } NodeType;
 
@@ -49,7 +52,7 @@ typedef struct Node {
       struct Node *body; /**< Function body (linked via right, NULL if empty) */
     } function;
     struct {
-      char *var_type;     /**< Variable type (int, bool, string, char) */
+      char *var_type;     /**< Variable type (num, bool, string, char) */
       char *name;         /**< Variable name */
       struct Node *value; /**< Initial value (optional) */
     } var_decl;
@@ -89,6 +92,9 @@ typedef struct Node {
       long long value; /**< Integer value */
     } int_literal;
     struct {
+      double value; /**< Floating point value */
+    } float_literal;
+    struct {
       char *value; /**< String value */
     } string_literal;
     struct {
@@ -102,6 +108,14 @@ typedef struct Node {
       char *name;         /**< Variable name */
       struct Node *value; /**< Assigned value */
     } assignment;
+    struct {
+      char *name;         /**< Variable name */
+      struct Node *value; /**< Value to add/subtract */
+    } add_assign;
+    struct {
+      char *name;         /**< Variable name */
+      struct Node *value; /**< Value to add/subtract */
+    } sub_assign;
     struct {
       char *object; /**< Object name */
       char *member; /**< Member name */

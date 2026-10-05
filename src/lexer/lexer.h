@@ -11,6 +11,7 @@
  */
 typedef enum {
   INT,           /**< Integer literal */
+  FLOAT,         /**< Floating point literal */
   IDENTIFIER,    /**< Variable or function name */
   KEYWORD,       /**< Language keyword */
   OPERATOR,      /**< Arithmetic or comparison operator */
@@ -44,6 +45,14 @@ Token *Lexer(FILE *file);
  * @return Token for integer literal
  */
 Token *lex_int(char current_char, int *current_index);
+
+/**
+ * @brief Lexes a floating point literal
+ * @param current_char Starting character
+ * @param current_index Current position in buffer (updated)
+ * @return Token for floating point literal
+ */
+Token *lex_float(char current_char, int *current_index);
 
 /**
  * @brief Lexes a keyword or identifier

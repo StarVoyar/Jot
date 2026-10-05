@@ -8,12 +8,12 @@ Working end-to-end compiler: lexer (tokens) → parser (AST) → codegen (`.asm`
 
 ## Language Features
 
-- **Keywords**: `fn`, `return`, `if`, `else`, `while`, `for`, `print`, `int`, `bool`, `string`, `array`
-- **Literals**: 64-bit integer literals, string literals
-- **Operators**: Arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), assignment (`=`). Precedence is C-like: `*`/`/`/`%` over `+`/`-` over comparisons
+- **Keywords**: `fn`, `return`, `if`, `else`, `while`, `for`, `print`, `num`, `bool`, `string`, `array`
+- **Literals**: 64-bit integer literals, 64-bit floating point literals, string literals
+- **Operators**: Arithmetic (`+`, `-`, `*`, `/`, `%` ints only), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), assignment (`=`, `+=`, `-=`). Precedence is C-like: `*`/`/`/`%` over `+`/`-` over comparisons. Mixed int/float promotes to float (`+`, `-`, `*`, `/` use `addsd`/`subsd`/`mulsd`/`divsd`, comparisons use `ucomisd`)
 - **Separators**: Semicolons, parentheses, braces, brackets, commas, dot (for `self.arg`)
 - **Control Flow**: if/else statements (plus else-if), while loops, `for (x in arr)` array iteration
-- **Data Types**: int, bool, string, plus number arrays. Values are category-checked (numbers vs strings); mismatches are errors
+- **Data Types**: num (holds ints or doubles; int vars promote to float on float assign, int operands promote via `cvtsi2sd`), bool, string, plus number arrays (float arrays convert ints). Values are category-checked (numbers vs strings); mismatches are errors. `%` on floats is an error
 - **Functions**: Definitions with typed or untyped params (any count: first four use registers, the rest spill to the stack). Nothing runs until called — top-level statements are the entry point, `fn main` is an ordinary function invoked with `main();`. Inside a body, parameters are read as `self.name` (bare use warns); locals stay bare. Shadowing a parameter warns. Duplicate params, calls to undefined functions, and arity mismatches are errors with locations
 - **Member access**: `self.arg` for parameters (also inside `{...}` print interpolation). Other objects and member assignment are not supported
 - **Visibility**: `fn public name` / `fn private name`. Missing visibility warns and defaults to private (`main` defaults to public). Only public functions can be imported
@@ -47,10 +47,10 @@ Targets: `build` compiles `src/**/*.c`, `link` links `build/bin/jotc`, `debug` d
 ## Usage
 
 ```bash
-./build/bin/jotc <file.jot> [output.asm] [--debug]
+./build/bin/jotc <file.jot> [-o output] [--debug]
 ```
 
-Without `output.asm` the assembly goes to `build/bin/generated/<name>.asm`. Without `--debug` only errors/warnings print.
+The `-o` flag specifies the output file (e.g., `main.exe`, `main.o`, or `main`). The compiler validates that the output directory exists and warns if the file already exists. Without `-o`, the assembly goes to `build/bin/generated/<name>.asm`. Without `--debug` only errors/warnings print.
 
 ## Example
 
@@ -58,8 +58,8 @@ Without `output.asm` the assembly goes to `build/bin/generated/<name>.asm`. With
 
 ```jot
 fn main() {
-  int x = 2;
-  int y = x + 4;
+  num x = 2;
+  num y = x + 4;
   print("Y: {y} \n");
   return(1);
 }
@@ -76,8 +76,8 @@ prints `Y: 6 ` (the `1` is `main`'s return value to its caller; the process exit
 Parameters use `self`:
 
 ```jot
-fn add(int var1, int var2) {
-  int sum = self.var1 + self.var2;
+fn add(num var1, num var2) {
+  num sum = self.var1 + self.var2;
   print("Sum: {sum}\n");
   return(sum);
 }
@@ -90,8 +90,8 @@ prints `Sum: 30`.
 Splitting across files (`math.jot`):
 
 ```jot
-fn public add(int var1, int var2) {
-  int sum = self.var1 + self.var2;
+fn public add(num var1, num var2) {
+  num sum = self.var1 + self.var2;
   return(sum);
 }
 ```

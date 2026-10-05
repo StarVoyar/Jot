@@ -1,6 +1,6 @@
-fn main(int argc) {
-  int x = 2;
-  int y = x + 4;
+fn main(num argc) {
+  num x = 2;
+  num y = x + 4;
   print("Y: {y} \n");
   return(1);
 }

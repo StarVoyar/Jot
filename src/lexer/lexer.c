@@ -56,6 +56,11 @@ Token *Lexer(FILE *file) {
       tokens[tokens_index] = *token;
       tokens_index++;
       free(token);
+    } else if (character == '.' && isdigit(global_buffer[current_index + 1])) {
+      Token *token = lex_float(character, &current_index);
+      tokens[tokens_index] = *token;
+      tokens_index++;
+      free(token);
     } else if (isalpha(character) || character == '_') {
       Token *token = lex_keyword(character, &current_index);
       tokens[tokens_index] = *token;
@@ -203,6 +208,76 @@ Token *lex_int(char current_char, int *current_index) {
     current_char = global_buffer[*current_index];
   }
 
+  if (current_char == '.' && isdigit(global_buffer[*current_index + 1])) {
+    /* Integer part already in value[0..value_index-1]; continue as float. */
+    char fvalue[64];
+    int f_index = 0;
+    for (int k = 0; k < value_index && f_index < 63; k++) {
+      fvalue[f_index++] = value[k];
+    }
+    /* Consume '.' */
+    if (f_index < 63) {
+      fvalue[f_index++] = '.';
+    }
+    (*current_index)++;
+    char next_char = global_buffer[*current_index];
+    while (isdigit(next_char) && next_char != '\0' && f_index < 63) {
+      fvalue[f_index++] = next_char;
+      (*current_index)++;
+      next_char = global_buffer[*current_index];
+    }
+    fvalue[f_index] = '\0';
+    free(token);
+    Token *ftoken = malloc(sizeof(Token));
+    ftoken->type = FLOAT;
+    ftoken->line = token_line;
+    ftoken->col = token_col;
+    size_t len = strlen(fvalue);
+    char *value_copy = malloc(len + 1);
+    memcpy(value_copy, fvalue, len);
+    value_copy[len] = '\0';
+    ftoken->value = value_copy;
+    return ftoken;
+  }
+
+  value[value_index] = '\0';
+  size_t len = strlen(value);
+  char *value_copy = malloc(len + 1);
+  memcpy(value_copy, value, len);
+  value_copy[len] = '\0';
+  token->value = value_copy;
+
+  return token;
+}
+
+/**
+ * @brief Lexes a floating point literal
+ * @param current_char Starting character (should be '.')
+ * @param current_index Current position in buffer (updated)
+ * @return Token for floating point literal
+ */
+Token *lex_float(char current_char, int *current_index) {
+  Token *token = malloc(sizeof(Token));
+  token->type = FLOAT;
+  token->line = token_line;
+  token->col = token_col;
+
+  char value[64];
+  int value_index = 0;
+
+  if (current_char == '.') {
+    value[value_index++] = '0';
+    value[value_index++] = '.';
+    (*current_index)++;
+  }
+
+  char next_char = global_buffer[*current_index];
+  while (isdigit(next_char) && next_char != '\0' && value_index < 63) {
+    value[value_index++] = next_char;
+    (*current_index)++;
+    next_char = global_buffer[*current_index];
+  }
+
   value[value_index] = '\0';
   size_t len = strlen(value);
   char *value_copy = malloc(len + 1);
@@ -238,7 +313,7 @@ Token *lex_keyword(char current_char, int *current_index) {
   if (strcmp(keyword, "return") == 0 || strcmp(keyword, "if") == 0 ||
       strcmp(keyword, "else") == 0 || strcmp(keyword, "while") == 0 ||
       strcmp(keyword, "for") == 0 || strcmp(keyword, "fn") == 0 ||
-      strcmp(keyword, "print") == 0 || strcmp(keyword, "int") == 0 ||
+      strcmp(keyword, "print") == 0 || strcmp(keyword, "num") == 0 ||
       strcmp(keyword, "bool") == 0 || strcmp(keyword, "string") == 0 ||
       strcmp(keyword, "array") == 0) {
     token->type = KEYWORD;
@@ -290,7 +365,9 @@ Token *lex_operator(char character, int *current_index) {
   if ((character == '=' && next_char == '=') ||
       (character == '!' && next_char == '=') ||
       (character == '<' && next_char == '=') ||
-      (character == '>' && next_char == '=')) {
+      (character == '>' && next_char == '=') ||
+      (character == '+' && next_char == '=') ||
+      (character == '-' && next_char == '=')) {
     op[1] = next_char;
     (*current_index)++;
   }
@@ -367,6 +444,9 @@ void print_token(Token token) {
   case INT:
     printf(", Token Type: INT \n");
     break;
+  case FLOAT:
+    printf(", Token Type: FLOAT \n");
+    break;
   case IDENTIFIER:
     printf(", Token Type: IDENTIFIER \n");
     break;
@@ -403,10 +483,10 @@ void free_tokens(Token *tokens) {
       break;
     }
     if (tokens[i].value != NULL &&
-        (tokens[i].type == INT || tokens[i].type == IDENTIFIER ||
-         tokens[i].type == KEYWORD || tokens[i].type == OPERATOR ||
-         tokens[i].type == STRING || tokens[i].type == SEPARATOR ||
-         tokens[i].type == UNKNOWN)) {
+        (tokens[i].type == INT || tokens[i].type == FLOAT ||
+         tokens[i].type == IDENTIFIER || tokens[i].type == KEYWORD ||
+         tokens[i].type == OPERATOR || tokens[i].type == STRING ||
+         tokens[i].type == SEPARATOR || tokens[i].type == UNKNOWN)) {
       free(tokens[i].value);
     }
   }
