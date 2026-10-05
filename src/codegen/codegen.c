@@ -12,19 +12,50 @@ static int label_id;
 static int string_count;
 
 /** Collected string literal values */
-static char *string_table[256];
+static char *string_table[1024];
+
+/**
+ * @brief Value categories tracked by the type checker
+ */
+typedef enum {
+  TYPE_INT,    /**< Integers and integer-like values */
+  TYPE_BOOL,   /**< Comparison results */
+  TYPE_STRING, /**< String pointers */
+  TYPE_ARRAY   /**< Arrays (not first-class values) */
+} ValueType;
 
 /** Variable names in the current function frame */
-static char *var_names[64];
+static char *var_names[256];
 
-/** Whether a variable holds a string pointer (1) or an integer (0) */
-static int var_is_string[64];
+/** Declared type of each variable in the current frame */
+static ValueType var_types[256];
 
 /** Whether a variable is a function parameter (1) or a local (0) */
-static int var_is_param[64];
+static int var_is_param[256];
+
+/** Whether a variable was loaded at least once */
+static int var_used[256];
+
+/** Source line of each variable declaration */
+static int var_line[256];
+
+/** Source column of each variable declaration */
+static int var_col[256];
 
 /** Number of variables in the current frame */
 static int var_count;
+
+/** Array names in the current frame */
+static char *array_names[64];
+
+/** First slot of each array in the current frame */
+static int array_base[64];
+
+/** Element count of each array in the current frame */
+static int array_len[64];
+
+/** Number of arrays in the current frame */
+static int array_count;
 
 /** Reserved stack bytes for locals */
 static int frame_size;
@@ -34,6 +65,15 @@ static int in_function;
 
 /** Non-zero if the program defines fn main (it lives at jot_main) */
 static int has_user_main;
+
+/** Names of defined functions for argument type checking */
+static char *sig_names[256];
+
+/** Parameter lists of defined functions, parallel to sig_names */
+static Node *sig_params[256];
+
+/** Number of recorded signatures */
+static int sig_count;
 
 /** Forward declaration for recursive generation */
 static void gen_expression(Node *node);
@@ -77,13 +117,55 @@ static NORETURN void codegen_error(Node *node, const char *format, ...) {
 }
 
 /**
- * @brief Finds a variable in the current frame
+ * @brief Warns without exiting, with source context
+ * @param node Fault node, may be NULL (uses 1:1 then)
+ * @param format printf-style message without the Warning: prefix
+ */
+static void codegen_warning(Node *node, const char *format, ...) {
+  char message[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  int line = 1;
+  int col = 1;
+  int width = 1;
+  if (node != NULL) {
+    if (node->line > 0) {
+      line = node->line;
+    }
+    if (node->col > 0) {
+      col = node->col;
+    }
+    if (node->width > 0) {
+      width = node->width;
+    }
+  }
+  term_report(TERM_WARNING, codegen_source, line, col, width, message);
+}
+
+/**
+ * @brief Finds a variable in the current frame (innermost wins)
  * @param name Variable name to look up
  * @return Slot index, or -1 if not found
  */
 static int find_var(const char *name) {
-  for (int i = 0; i < var_count; i++) {
-    if (strcmp(var_names[i], name) == 0) {
+  for (int i = var_count - 1; i >= 0; i--) {
+    if (var_names[i] != NULL && strcmp(var_names[i], name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Finds an array in the current frame
+ * @param name Array name to look up
+ * @return Slot index, or -1 if not found
+ */
+static int find_array(const char *name) {
+  for (int i = 0; i < array_count; i++) {
+    if (strcmp(array_names[i], name) == 0) {
       return i;
     }
   }
@@ -94,26 +176,29 @@ static int find_var(const char *name) {
  * @brief Adds a variable to the current frame
  * @param node Declaration node at fault if the frame is full
  * @param name Variable name to store
- * @param is_str Non-zero if the variable holds a string pointer
+ * @param type Declared value category
  * @param is_param Non-zero if the variable is a function parameter
  * @return Slot index of the new variable
  */
-static int add_var(Node *node, const char *name, int is_str, int is_param) {
-  if (var_count >= 32) {
+static int add_var(Node *node, const char *name, ValueType type, int is_param) {
+  if (var_count >= 256) {
     codegen_error(node, "Too many variables in function");
   }
   size_t len = strlen(name);
   var_names[var_count] = malloc(len + 1);
   memcpy(var_names[var_count], name, len);
   var_names[var_count][len] = '\0';
-  var_is_string[var_count] = is_str;
+  var_types[var_count] = type;
   var_is_param[var_count] = is_param;
+  var_used[var_count] = 0;
+  var_line[var_count] = node != NULL ? node->line : 1;
+  var_col[var_count] = node != NULL ? node->col : 1;
   var_count++;
   return var_count - 1;
 }
 
 /**
- * @brief Loads a variable slot, rejecting bare parameter access
+ * @brief Loads a variable slot, warning on bare parameter access
  * @param node Identifier node at fault
  * @param name Variable name from source
  * @return Slot index
@@ -124,9 +209,10 @@ static int require_var(Node *node, const char *name) {
     codegen_error(node, "Variable '%s' not declared", name);
   }
   if (var_is_param[slot]) {
-    codegen_error(node, "Parameter '%s' must be accessed as self.%s", name,
-                  name);
+    codegen_warning(node, "Parameter '%s' should be accessed as self.%s", name,
+                    name);
   }
+  var_used[slot] = 1;
   return slot;
 }
 
@@ -141,7 +227,120 @@ static int require_param(Node *node, const char *member) {
   if (slot < 0 || !var_is_param[slot]) {
     codegen_error(node, "'%s' is not a parameter", member);
   }
+  var_used[slot] = 1;
   return slot;
+}
+
+/**
+ * @brief Warns about unused locals declared in a scope
+ * @param from First slot of the scope, restores nothing
+ */
+static void check_unused_vars(int from) {
+  for (int i = from; i < var_count; i++) {
+    if (var_names[i] != NULL && !var_is_param[i] && !var_used[i]) {
+      char message[96];
+      snprintf(message, sizeof(message), "Variable '%s' is never used",
+               var_names[i]);
+      term_report(TERM_WARNING, codegen_source, var_line[i], var_col[i], 1,
+                  message);
+    }
+  }
+}
+
+/**
+ * @brief Maps a type keyword to a value category
+ * @param keyword Type keyword from source (int, bool, string, char, array)
+ * @return Matching value category, int for anything else
+ */
+static ValueType type_keyword(const char *keyword) {
+  if (strcmp(keyword, "bool") == 0) {
+    return TYPE_BOOL;
+  }
+  if (strcmp(keyword, "string") == 0) {
+    return TYPE_STRING;
+  }
+  if (strcmp(keyword, "array") == 0) {
+    return TYPE_ARRAY;
+  }
+  return TYPE_INT;
+}
+
+/**
+ * @brief Names a value category for messages
+ * @param type Value category
+ * @return Type name (int, bool, string, array)
+ */
+static const char *type_name(ValueType type) {
+  switch (type) {
+  case TYPE_BOOL:
+    return "bool";
+  case TYPE_STRING:
+    return "string";
+  case TYPE_ARRAY:
+    return "array";
+  default:
+    return "int";
+  }
+}
+
+/**
+ * @brief Checks if a value category behaves as a number
+ * @param type Value category
+ * @return Non-zero for int and bool
+ */
+static int is_numeric(ValueType type) {
+  return type == TYPE_INT || type == TYPE_BOOL;
+}
+
+/**
+ * @brief Checks two categories are assignment compatible
+ * @param declared Declared type of the target
+ * @param given Inferred type of the value
+ * @return Non-zero if the value may be stored in the target
+ */
+static int types_compatible(ValueType declared, ValueType given) {
+  if (declared == TYPE_STRING || given == TYPE_STRING) {
+    return declared == TYPE_STRING && given == TYPE_STRING;
+  }
+  if (declared == TYPE_ARRAY || given == TYPE_ARRAY) {
+    return 0;
+  }
+  return is_numeric(declared) && is_numeric(given);
+}
+
+/**
+ * @brief Infers the value category of an expression
+ * @param node Expression node (identifiers must be declared)
+ * @return Inferred category, int for calls with unknown signatures
+ */
+static ValueType expr_type(Node *node) {
+  switch (node->type) {
+  case NODE_INT_LITERAL:
+    return TYPE_INT;
+  case NODE_STRING_LITERAL:
+    return TYPE_STRING;
+  case NODE_IDENTIFIER: {
+    int slot = require_var(node, node->identifier.name);
+    return var_types[slot];
+  }
+  case NODE_FUNC_CALL:
+    return TYPE_INT;
+  case NODE_BINARY_OP: {
+    const char *op = node->binary_op.op;
+    if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+        strcmp(op, "<") == 0 || strcmp(op, ">") == 0 || strcmp(op, "<=") == 0 ||
+        strcmp(op, ">=") == 0) {
+      return TYPE_BOOL;
+    }
+    return TYPE_INT;
+  }
+  case NODE_MEMBER_ACCESS: {
+    int slot = require_param(node, node->member_access.member);
+    return var_types[slot];
+  }
+  default:
+    return TYPE_INT;
+  }
 }
 
 /**
@@ -155,7 +354,7 @@ static int add_string(const char *value) {
       return i;
     }
   }
-  if (string_count >= 256) {
+  if (string_count >= 1024) {
     codegen_error(NULL, "Too many string literals");
   }
   size_t len = strlen(value);
@@ -362,9 +561,15 @@ static void write_nasm_string(const char *value) {
  */
 static void gen_data_section() {
   fprintf(out, "section .data\n");
-  fprintf(out, "  fmt_int db \"%%d\", 10, 0\n");
-  fprintf(out, "  fmt_int_raw db \"%%d\", 0\n");
+  fprintf(out, "  fmt_int db \"%%lld\", 10, 0\n");
+  fprintf(out, "  fmt_int_raw db \"%%lld\", 0\n");
   fprintf(out, "  fmt_str db \"%%s\", 0\n");
+  fprintf(out, "  fmt_input db \"%%d\", 0\n");
+  fprintf(out, "  fmt_invalid db \"invalid input: expected integer\", 10, 0\n");
+  fprintf(out, "  fmt_overflow db \"integer overflow\", 10, 0\n");
+  fprintf(out, "  fmt_divzero db \"division by zero\", 10, 0\n");
+  fprintf(out, "  fmt_stack db \"stack overflow\", 10, 0\n");
+  fprintf(out, "  stack_floor dq 0\n");
   for (int i = 0; i < string_count; i++) {
     fprintf(out, "  str%d db ", i);
     if (string_table[i][0] == '\0') {
@@ -383,6 +588,27 @@ static void gen_prologue() {
   fprintf(out, "  push rbp\n");
   fprintf(out, "  mov rbp, rsp\n");
   fprintf(out, "  sub rsp, %d\n", frame_size);
+  fprintf(out, "  cmp rsp, [rel stack_floor]\n");
+  fprintf(out, "  jb stack_overflow_trap\n");
+}
+
+/**
+ * @brief Emits a fatal runtime trap (message to stdout, exit 3)
+ * @param label Trap label to define
+ * @param format Data label holding the message
+ */
+static void gen_trap(const char *label, const char *format) {
+  fprintf(out, "%s:\n", label);
+  fprintf(out, "  mov rax, rsp\n");
+  fprintf(out, "  and rax, 8\n");
+  fprintf(out, "  sub rsp, rax\n");
+  fprintf(out, "  lea rcx, [rel %s]\n", format);
+  fprintf(out, "  sub rsp, 32\n");
+  fprintf(out, "  call printf\n");
+  fprintf(out, "  add rsp, 32\n");
+  fprintf(out, "  mov ecx, 3\n");
+  fprintf(out, "  sub rsp, 32\n");
+  fprintf(out, "  call exit\n");
 }
 
 /**
@@ -398,6 +624,29 @@ static const char *func_label(const char *name) {
 }
 
 /**
+ * @brief Generates a stdin integer read, result left in rax
+ * @details Aligns the stack dynamically since calls inside expressions
+ * may run with rsp 8 off 16 byte alignment.
+ */
+static void gen_input() {
+  fprintf(out, "  mov rax, rsp\n");
+  fprintf(out, "  and rax, 8\n");
+  fprintf(out, "  sub rsp, rax\n");
+  fprintf(out, "  sub rsp, 48\n");
+  fprintf(out, "  mov [rsp + 32], rax\n");
+  fprintf(out, "  mov dword [rsp + 40], 0\n");
+  fprintf(out, "  lea rcx, [rel fmt_input]\n");
+  fprintf(out, "  lea rdx, [rsp + 40]\n");
+  fprintf(out, "  call scanf\n");
+  fprintf(out, "  cmp rax, 1\n");
+  fprintf(out, "  jne input_error_trap\n");
+  fprintf(out, "  movsxd rax, dword [rsp + 40]\n");
+  fprintf(out, "  mov r10, [rsp + 32]\n");
+  fprintf(out, "  add rsp, 48\n");
+  fprintf(out, "  add rsp, r10\n");
+}
+
+/**
  * @brief Generates code for a function call, result left in rax
  * @param node Call node to generate
  * @details First four arguments use rcx, rdx, r8, r9. The rest spill
@@ -409,20 +658,33 @@ static void gen_call(Node *node) {
   for (Node *a = node->func_call.args; a != NULL; a = a->right) {
     arg_count++;
   }
-  if (arg_count <= 4) {
-    int i = 0;
-    for (Node *a = node->func_call.args; a != NULL; a = a->right) {
-      gen_expression(a);
-      fprintf(out, "  mov %s, rax\n", regs[i]);
-      i++;
+  if (strcmp(node->func_call.name, "input") == 0) {
+    if (arg_count != 0) {
+      codegen_error(node, "input takes no arguments");
     }
-    fprintf(out, "  sub rsp, 32\n");
-    fprintf(out, "  call %s\n", func_label(node->func_call.name));
-    fprintf(out, "  add rsp, 32\n");
+    gen_input();
     return;
   }
-
-  int frame = 64 + 8 * (arg_count - 4);
+  for (int s = 0; s < sig_count; s++) {
+    if (strcmp(sig_names[s], node->func_call.name) == 0) {
+      Node *a = node->func_call.args;
+      Node *p = sig_params[s];
+      while (a != NULL && p != NULL) {
+        ValueType given = expr_type(a);
+        ValueType want = p->type == NODE_VAR_DECL
+                             ? type_keyword(p->var_decl.var_type)
+                             : TYPE_INT;
+        if (!types_compatible(want, given)) {
+          codegen_error(a, "Cannot pass %s to %s parameter", type_name(given),
+                        type_name(want));
+        }
+        a = a->right;
+        p = p->right;
+      }
+      break;
+    }
+  }
+  int frame = 64 + 8 * (arg_count > 4 ? arg_count - 4 : 0);
   if (frame % 16 != 0) {
     frame += 8;
   }
@@ -437,7 +699,7 @@ static void gen_call(Node *node) {
     }
     i++;
   }
-  for (i = 0; i < 4; i++) {
+  for (i = 0; i < arg_count && i < 4; i++) {
     fprintf(out, "  mov %s, [rsp + %d]\n", regs[i], frame - 32 + 8 * i);
   }
   fprintf(out, "  call %s\n", func_label(node->func_call.name));
@@ -455,7 +717,7 @@ static void gen_expression(Node *node) {
 
   switch (node->type) {
   case NODE_INT_LITERAL:
-    fprintf(out, "  mov rax, %d\n", node->int_literal.value);
+    fprintf(out, "  mov rax, %lld\n", node->int_literal.value);
     break;
   case NODE_IDENTIFIER: {
     int slot = require_var(node, node->identifier.name);
@@ -464,8 +726,7 @@ static void gen_expression(Node *node) {
   }
   case NODE_MEMBER_ACCESS: {
     if (strcmp(node->member_access.object, "self") != 0) {
-      printf("Error: Only self.member access is supported\n");
-      exit(1);
+      codegen_error(node, "Only self.member access is supported");
     }
     int slot = require_param(node, node->member_access.member);
     fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
@@ -484,6 +745,13 @@ static void gen_expression(Node *node) {
     break;
   case NODE_BINARY_OP: {
     const char *op = node->binary_op.op;
+    ValueType left_type = expr_type(node->binary_op.left);
+    ValueType right_type = expr_type(node->binary_op.right);
+    if (!is_numeric(left_type) || !is_numeric(right_type)) {
+      ValueType bad = !is_numeric(left_type) ? left_type : right_type;
+      codegen_error(node, "Operator '%s' cannot be applied to %s", op,
+                    type_name(bad));
+    }
     gen_expression(node->binary_op.left);
     fprintf(out, "  push rax\n");
     gen_expression(node->binary_op.right);
@@ -491,16 +759,31 @@ static void gen_expression(Node *node) {
     fprintf(out, "  pop rax\n");
     if (strcmp(op, "+") == 0) {
       fprintf(out, "  add rax, rbx\n");
+      fprintf(out, "  jo overflow_trap\n");
     } else if (strcmp(op, "-") == 0) {
       fprintf(out, "  sub rax, rbx\n");
+      fprintf(out, "  jo overflow_trap\n");
     } else if (strcmp(op, "*") == 0) {
       fprintf(out, "  imul rax, rbx\n");
+      fprintf(out, "  jo overflow_trap\n");
     } else if (strcmp(op, "/") == 0) {
-      fprintf(out, "  xor rdx, rdx\n");
-      fprintf(out, "  div rbx\n");
+      if (node->binary_op.right->type == NODE_INT_LITERAL &&
+          node->binary_op.right->int_literal.value == 0) {
+        codegen_error(node->binary_op.right, "Division by zero");
+      }
+      fprintf(out, "  test rbx, rbx\n");
+      fprintf(out, "  jz divzero_trap\n");
+      fprintf(out, "  cqo\n");
+      fprintf(out, "  idiv rbx\n");
     } else if (strcmp(op, "%") == 0) {
-      fprintf(out, "  xor rdx, rdx\n");
-      fprintf(out, "  div rbx\n");
+      if (node->binary_op.right->type == NODE_INT_LITERAL &&
+          node->binary_op.right->int_literal.value == 0) {
+        codegen_error(node->binary_op.right, "Division by zero");
+      }
+      fprintf(out, "  test rbx, rbx\n");
+      fprintf(out, "  jz divzero_trap\n");
+      fprintf(out, "  cqo\n");
+      fprintf(out, "  idiv rbx\n");
       fprintf(out, "  mov rax, rdx\n");
     } else if (strcmp(op, "==") == 0) {
       fprintf(out, "  cmp rax, rbx\n");
@@ -543,6 +826,13 @@ static void gen_expression(Node *node) {
  * @param false_label Label to jump to when the condition is false
  */
 static void gen_condition_jump(Node *cond, int false_label) {
+  if (cond != NULL) {
+    ValueType cond_type = expr_type(cond);
+    if (!is_numeric(cond_type)) {
+      codegen_error(cond, "Condition must be a number, got %s",
+                    type_name(cond_type));
+    }
+  }
   if (cond != NULL && cond->type == NODE_BINARY_OP) {
     const char *op = cond->binary_op.op;
     if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
@@ -626,7 +916,7 @@ static void gen_print_string(Node *strnode, const char *value) {
             slot = require_param(strnode, dot + 1);
           }
           free(name);
-          if (var_is_string[slot]) {
+          if (var_types[slot] == TYPE_STRING) {
             fprintf(out, "  lea rcx, [rel fmt_str]\n");
             fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
           } else {
@@ -665,10 +955,13 @@ static void gen_print_string(Node *strnode, const char *value) {
  */
 static void gen_block(Node *list) {
   int saved = var_count;
+  int saved_arrays = array_count;
   for (Node *s = list; s != NULL; s = s->right) {
     gen_statement(s);
   }
+  check_unused_vars(saved);
   var_count = saved;
+  array_count = saved_arrays;
 }
 
 /**
@@ -678,20 +971,28 @@ static void gen_block(Node *list) {
 static void gen_statement(Node *node) {
   switch (node->type) {
   case NODE_VAR_DECL: {
-    if (find_var(node->var_decl.name) >= 0) {
+    int existing = find_var(node->var_decl.name);
+    if (existing >= 0 && !var_is_param[existing]) {
       codegen_error(node, "Variable '%s' already declared",
                     node->var_decl.name);
     }
-    int is_str = 0;
-    if (node->var_decl.value != NULL &&
-        node->var_decl.value->type == NODE_STRING_LITERAL) {
-      is_str = 1;
+    if (find_array(node->var_decl.name) >= 0) {
+      codegen_error(node, "Variable '%s' already declared",
+                    node->var_decl.name);
     }
-    if (node->var_decl.value != NULL &&
-        strcmp(node->var_decl.var_type, "string") == 0) {
-      is_str = 1;
+    if (existing >= 0) {
+      codegen_warning(node, "Shadows parameter '%s'", node->var_decl.name);
     }
-    int slot = add_var(node, node->var_decl.name, is_str, 0);
+    ValueType declared = type_keyword(node->var_decl.var_type);
+    if (node->var_decl.value != NULL) {
+      ValueType given = expr_type(node->var_decl.value);
+      if (!types_compatible(declared, given)) {
+        codegen_error(node->var_decl.value, "Cannot assign %s to %s '%s'",
+                      type_name(given), type_name(declared),
+                      node->var_decl.name);
+      }
+    }
+    int slot = add_var(node, node->var_decl.name, declared, 0);
     if (node->var_decl.value != NULL) {
       gen_expression(node->var_decl.value);
       fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
@@ -702,6 +1003,12 @@ static void gen_statement(Node *node) {
   }
   case NODE_ASSIGNMENT: {
     int slot = require_var(node, node->assignment.name);
+    ValueType given = expr_type(node->assignment.value);
+    if (!types_compatible(var_types[slot], given)) {
+      codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
+                    type_name(given), type_name(var_types[slot]),
+                    node->assignment.name);
+    }
     gen_expression(node->assignment.value);
     fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
     break;
@@ -712,7 +1019,7 @@ static void gen_statement(Node *node) {
       gen_print_string(value, value->string_literal.value);
     } else if (value != NULL && value->type == NODE_IDENTIFIER) {
       int slot = require_var(value, value->identifier.name);
-      if (var_is_string[slot]) {
+      if (var_types[slot] == TYPE_STRING) {
         fprintf(out, "  lea rcx, [rel fmt_str]\n");
         fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
       } else {
@@ -778,12 +1085,96 @@ static void gen_statement(Node *node) {
   case NODE_FUNCTION:
     codegen_error(node, "Nested functions not supported in codegen");
     break;
-  case NODE_ARRAY_DECL:
-    codegen_error(node, "Arrays not supported in codegen yet");
+  case NODE_ARRAY_DECL: {
+    int existing = find_var(node->array_decl.name);
+    if (existing >= 0 && !var_is_param[existing]) {
+      codegen_error(node, "Variable '%s' already declared",
+                    node->array_decl.name);
+    }
+    if (find_array(node->array_decl.name) >= 0) {
+      codegen_error(node, "Variable '%s' already declared",
+                    node->array_decl.name);
+    }
+    if (existing >= 0) {
+      codegen_warning(node, "Shadows parameter '%s'", node->array_decl.name);
+    }
+    int base = var_count;
+    int count = 0;
+    for (Node *e = node->array_decl.elements->array_literal.elements; e != NULL;
+         e = e->right) {
+      count++;
+    }
+    if (var_count + count > 256) {
+      codegen_error(node, "Too many variables in function");
+    }
+    for (Node *e = node->array_decl.elements->array_literal.elements; e != NULL;
+         e = e->right) {
+      ValueType given = expr_type(e);
+      if (!is_numeric(given)) {
+        codegen_error(e, "Array element must be a number, got %s",
+                      type_name(given));
+      }
+      gen_expression(e);
+      fprintf(out, "  push rax\n");
+    }
+    for (int i = 0; i < count; i++) {
+      fprintf(out, "  pop rax\n");
+      fprintf(out, "  mov [rbp - %d], rax\n", (base + i + 1) * 8);
+    }
+    var_count += count;
+    if (array_count >= 64) {
+      codegen_error(node, "Too many arrays in function");
+    }
+    size_t len = strlen(node->array_decl.name);
+    array_names[array_count] = malloc(len + 1);
+    memcpy(array_names[array_count], node->array_decl.name, len);
+    array_names[array_count][len] = '\0';
+    array_base[array_count] = base;
+    array_len[array_count] = count;
+    array_count++;
     break;
-  case NODE_FOR:
-    codegen_error(node, "For loops not supported in codegen yet");
+  }
+  case NODE_FOR: {
+    int arr = find_array(node->for_stmt.array_name);
+    if (arr < 0) {
+      codegen_error(node, "Array '%s' is not declared",
+                    node->for_stmt.array_name);
+    }
+    int saved = var_count;
+    int saved_arrays = array_count;
+    int existing = find_var(node->for_stmt.var_name);
+    if (existing >= 0 && !var_is_param[existing]) {
+      codegen_error(node, "Variable '%s' already declared",
+                    node->for_stmt.var_name);
+    }
+    if (find_array(node->for_stmt.var_name) >= 0) {
+      codegen_error(node, "Variable '%s' already declared",
+                    node->for_stmt.var_name);
+    }
+    if (existing >= 0) {
+      codegen_warning(node, "Shadows parameter '%s'", node->for_stmt.var_name);
+    }
+    int var_slot = add_var(node, node->for_stmt.var_name, TYPE_INT, 0);
+    int base = array_base[arr];
+    int count = array_len[arr];
+    int loop_label = label_id++;
+    int end_label = label_id++;
+    fprintf(out, "  push r12\n");
+    fprintf(out, "  xor r12d, r12d\n");
+    fprintf(out, "loop%d:\n", loop_label);
+    fprintf(out, "  cmp r12, %d\n", count);
+    fprintf(out, "  jge label%d\n", end_label);
+    fprintf(out, "  mov rax, [rbp - %d + r12*8]\n", (base + count) * 8);
+    fprintf(out, "  mov [rbp - %d], rax\n", (var_slot + 1) * 8);
+    gen_block(node->for_stmt.body);
+    fprintf(out, "  inc r12\n");
+    fprintf(out, "  jmp loop%d\n", loop_label);
+    fprintf(out, "label%d:\n", end_label);
+    fprintf(out, "  pop r12\n");
+    var_count = saved;
+    array_count = saved_arrays;
     break;
+  }
   default:
     codegen_error(node, "Unexpected statement in codegen");
     break;
@@ -797,8 +1188,10 @@ static void gen_statement(Node *node) {
 static void gen_function(Node *node) {
   const char *name = node->function.name;
   int saved_count = var_count;
+  int saved_arrays = array_count;
   int saved_in_function = in_function;
   var_count = 0;
+  array_count = 0;
   in_function = 1;
 
   fprintf(out, "%s:\n", func_label(name));
@@ -808,14 +1201,16 @@ static void gen_function(Node *node) {
   const char *param_regs[4] = {"rcx", "rdx", "r8", "r9"};
   for (Node *p = node->function.params; p != NULL; p = p->right) {
     const char *param_name = NULL;
+    ValueType param_type = TYPE_INT;
     if (p->type == NODE_VAR_DECL) {
       param_name = p->var_decl.name;
+      param_type = type_keyword(p->var_decl.var_type);
     } else if (p->type == NODE_IDENTIFIER) {
       param_name = p->identifier.name;
     } else {
       codegen_error(p, "Unexpected parameter in codegen");
     }
-    int slot = add_var(p, param_name, 0, 1);
+    int slot = add_var(p, param_name, param_type, 1);
     if (param_index < 4) {
       fprintf(out, "  mov [rbp - %d], %s\n", (slot + 1) * 8,
               param_regs[param_index]);
@@ -833,6 +1228,7 @@ static void gen_function(Node *node) {
   fprintf(out, "  ret\n");
 
   var_count = saved_count;
+  array_count = saved_arrays;
   in_function = saved_in_function;
 }
 
@@ -848,7 +1244,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   label_id = 0;
   string_count = 0;
   var_count = 0;
-  frame_size = 256;
+  frame_size = 2048;
   in_function = 0;
   has_user_main = 0;
 
@@ -856,6 +1252,18 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
     if (s->type == NODE_FUNCTION && strcmp(s->function.name, "main") == 0) {
       has_user_main = 1;
       break;
+    }
+  }
+
+  sig_count = 0;
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_FUNCTION && sig_count < 256) {
+      size_t len = strlen(s->function.name);
+      sig_names[sig_count] = malloc(len + 1);
+      memcpy(sig_names[sig_count], s->function.name, len);
+      sig_names[sig_count][len] = '\0';
+      sig_params[sig_count] = s->function.params;
+      sig_count++;
     }
   }
 
@@ -868,17 +1276,22 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
 
   fprintf(out, "global main\n");
   fprintf(out, "extern printf\n");
+  fprintf(out, "extern scanf\n");
   fprintf(out, "extern exit\n");
   gen_data_section();
   fprintf(out, "section .text\n");
 
   fprintf(out, "main:\n");
+  fprintf(out, "  mov rax, rsp\n");
+  fprintf(out, "  sub rax, 262144\n");
+  fprintf(out, "  mov [rel stack_floor], rax\n");
   gen_prologue();
   for (Node *s = root; s != NULL; s = s->right) {
     if (s->type != NODE_FUNCTION) {
       gen_statement(s);
     }
   }
+  check_unused_vars(0);
   fprintf(out, "  xor ecx, ecx\n");
   fprintf(out, "  sub rsp, 32\n");
   fprintf(out, "  call exit\n");
@@ -888,6 +1301,11 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
       gen_function(s);
     }
   }
+
+  gen_trap("overflow_trap", "fmt_overflow");
+  gen_trap("divzero_trap", "fmt_divzero");
+  gen_trap("stack_overflow_trap", "fmt_stack");
+  gen_trap("input_error_trap", "fmt_invalid");
 
   fclose(out);
 }

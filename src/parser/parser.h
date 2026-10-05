@@ -86,7 +86,7 @@ typedef struct Node {
       char *name; /**< Identifier name */
     } identifier;
     struct {
-      int value; /**< Integer value */
+      long long value; /**< Integer value */
     } int_literal;
     struct {
       char *value; /**< String value */

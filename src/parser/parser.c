@@ -457,7 +457,7 @@ static Node *create_node(NodeType type) {
  */
 static Node *parse_int_literal() {
   Node *node = create_node(NODE_INT_LITERAL);
-  node->int_literal.value = atoi(current_token->value);
+  node->int_literal.value = atoll(current_token->value);
   current_token++;
   return node;
 }
@@ -649,27 +649,102 @@ static Node *parse_primary() {
 }
 
 /**
- * @brief Parses an expression with binary operations
+ * @brief Creates a binary operation node for the current operator
+ * @param left Left operand (already parsed)
+ * @return New node with operator filled, right operand unset
+ */
+static Node *take_operator(Node *left) {
+  Node *op = create_node(NODE_BINARY_OP);
+  size_t len = strlen(current_token->value);
+  op->binary_op.op = malloc(len + 1);
+  memcpy(op->binary_op.op, current_token->value, len);
+  op->binary_op.op[len] = '\0';
+  current_token++;
+
+  op->binary_op.left = left;
+  return op;
+}
+
+/**
+ * @brief Parses *, / and % (highest precedence, left-associative)
  * @return AST node for expression
  */
-static Node *parse_expression() {
+static Node *parse_multiplicative() {
   Node *left = parse_primary();
 
-  while (current_token->type == OPERATOR) {
-    Node *op = create_node(NODE_BINARY_OP);
-    size_t len = strlen(current_token->value);
-    op->binary_op.op = malloc(len + 1);
-    memcpy(op->binary_op.op, current_token->value, len);
-    op->binary_op.op[len] = '\0';
-    current_token++;
-
-    op->binary_op.left = left;
+  while (current_token->type == OPERATOR &&
+         (strcmp(current_token->value, "*") == 0 ||
+          strcmp(current_token->value, "/") == 0 ||
+          strcmp(current_token->value, "%") == 0)) {
+    Node *op = take_operator(left);
     op->binary_op.right = parse_primary();
     left = op;
   }
 
   return left;
 }
+
+/**
+ * @brief Parses + and - (left-associative)
+ * @return AST node for expression
+ */
+static Node *parse_additive() {
+  Node *left = parse_multiplicative();
+
+  while (current_token->type == OPERATOR &&
+         (strcmp(current_token->value, "+") == 0 ||
+          strcmp(current_token->value, "-") == 0)) {
+    Node *op = take_operator(left);
+    op->binary_op.right = parse_multiplicative();
+    left = op;
+  }
+
+  return left;
+}
+
+/**
+ * @brief Parses <, >, <= and >= (left-associative)
+ * @return AST node for expression
+ */
+static Node *parse_relational() {
+  Node *left = parse_additive();
+
+  while (current_token->type == OPERATOR &&
+         (strcmp(current_token->value, "<") == 0 ||
+          strcmp(current_token->value, ">") == 0 ||
+          strcmp(current_token->value, "<=") == 0 ||
+          strcmp(current_token->value, ">=") == 0)) {
+    Node *op = take_operator(left);
+    op->binary_op.right = parse_additive();
+    left = op;
+  }
+
+  return left;
+}
+
+/**
+ * @brief Parses == and != (lowest precedence, left-associative)
+ * @return AST node for expression
+ */
+static Node *parse_equality() {
+  Node *left = parse_relational();
+
+  while (current_token->type == OPERATOR &&
+         (strcmp(current_token->value, "==") == 0 ||
+          strcmp(current_token->value, "!=") == 0)) {
+    Node *op = take_operator(left);
+    op->binary_op.right = parse_relational();
+    left = op;
+  }
+
+  return left;
+}
+
+/**
+ * @brief Parses an expression with binary operations
+ * @return AST node for expression
+ */
+static Node *parse_expression() { return parse_equality(); }
 
 /**
  * @brief Parses a return statement
@@ -1424,6 +1499,9 @@ static Node *parse_function() {
   node->function.name = malloc(len + 1);
   memcpy(node->function.name, current_token->value, len);
   node->function.name[len] = '\0';
+  if (strcmp(node->function.name, "input") == 0) {
+    parse_error("Function name 'input' is reserved\n");
+  }
   check_duplicate_fn(node->function.name, current_token->line,
                      current_token->col, token_width());
   int name_line = current_token->line;
@@ -1447,7 +1525,6 @@ static Node *parse_function() {
           (strcmp(current_token->value, "int") == 0 ||
            strcmp(current_token->value, "bool") == 0 ||
            strcmp(current_token->value, "string") == 0 ||
-           strcmp(current_token->value, "char") == 0 ||
            strcmp(current_token->value, "array") == 0)) {
         param = create_node(NODE_VAR_DECL);
         len = strlen(current_token->value);
@@ -1570,8 +1647,7 @@ static Node *parse_statement() {
       return parse_print();
     } else if (strcmp(current_token->value, "int") == 0 ||
                strcmp(current_token->value, "bool") == 0 ||
-               strcmp(current_token->value, "string") == 0 ||
-               strcmp(current_token->value, "char") == 0) {
+               strcmp(current_token->value, "string") == 0) {
       return parse_var_decl();
     } else if (strcmp(current_token->value, "array") == 0) {
       return parse_array_decl();
@@ -1666,6 +1742,9 @@ Node *Parser(Token *tokens, const char *filename) {
       int call_count = 0;
       collect_calls(s, calls, &call_count, 1024);
       for (int k = 0; k < call_count; k++) {
+        if (strcmp(calls[k]->func_call.name, "input") == 0) {
+          continue;
+        }
         Node *def = find_function_in(program_head, calls[k]->func_call.name);
         if (def == NULL) {
           char message[96];
@@ -1773,7 +1852,7 @@ void print_tree(Node *root) {
     printf("Id(%s)", root->identifier.name);
     break;
   case NODE_INT_LITERAL:
-    printf("Int(%d)", root->int_literal.value);
+    printf("Int(%lld)", root->int_literal.value);
     break;
   case NODE_STRING_LITERAL:
     printf("String(\"%s\")", root->string_literal.value);
