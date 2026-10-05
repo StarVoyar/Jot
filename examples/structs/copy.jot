@@ -1,6 +1,6 @@
 struct private object {
   num size;
-  string label;
+  str label;
 }
 
 fn public main() {

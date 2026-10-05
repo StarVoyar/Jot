@@ -1,5 +1,5 @@
 fn public main() {
-  string a = "hello";
+  str a = "hello";
   print(a[0]);
   print("\n");
   print(a[1]);

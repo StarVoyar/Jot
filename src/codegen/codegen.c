@@ -24,7 +24,8 @@ typedef enum {
   TYPE_STRING, /**< String pointers */
   TYPE_ARRAY,  /**< Arrays (not first-class values) */
   TYPE_STRUCT, /**< Struct instance (heap pointer) */
-  TYPE_CLASS   /**< Class instance (heap pointer) */
+  TYPE_CLASS,  /**< Class instance (heap pointer) */
+  TYPE_NULL    /**< null (no reference) */
 } ValueType;
 
 /** Maximum fields per struct/class */
@@ -160,6 +161,18 @@ static int cur_class;
 /** Method index of the method being generated, -1 when not in a method */
 static int cur_method;
 
+/** Maximum nesting depth of loops */
+#define MAX_LOOP_DEPTH 32
+
+/** Label to jump to for break, innermost loop last */
+static int loop_break_label[MAX_LOOP_DEPTH];
+
+/** Label to jump to for continue, innermost loop last */
+static int loop_continue_label[MAX_LOOP_DEPTH];
+
+/** Number of loops currently open */
+static int loop_depth;
+
 /** Forward declaration for recursive generation */
 static void gen_expression(Node *node);
 
@@ -177,6 +190,18 @@ static void check_call_arg(Node *arg, ValueType want, const char *want_kind);
 
 /** Forward declaration for method calls (result left in rax) */
 static void gen_method_call(Node *node);
+
+/** Forward declaration for the toStr builtin (heap string in rax) */
+static void gen_to_str(Node *node);
+
+/** Forward declaration for the toNum builtin (double bits in rax) */
+static void gen_to_num(Node *node);
+
+/** Forward declaration for the readFile builtin (heap string in rax) */
+static void gen_read_file(Node *node);
+
+/** Forward declaration for the writeFile builtin (byte count in rax) */
+static void gen_write_file(Node *node);
 
 /** Jump target for abandoning the current statement after an error */
 static jmp_buf gen_jmp;
@@ -487,7 +512,7 @@ static ValueType resolve_decl_type(const char *keyword, Node *node,
   if (strcmp(keyword, "bool") == 0) {
     return TYPE_BOOL;
   }
-  if (strcmp(keyword, "string") == 0) {
+  if (strcmp(keyword, "str") == 0) {
     return TYPE_STRING;
   }
   if (strcmp(keyword, "array") == 0) {
@@ -571,7 +596,7 @@ static ValueType type_keyword(const char *keyword) {
   if (strcmp(keyword, "bool") == 0) {
     return TYPE_BOOL;
   }
-  if (strcmp(keyword, "string") == 0) {
+  if (strcmp(keyword, "str") == 0) {
     return TYPE_STRING;
   }
   if (strcmp(keyword, "array") == 0) {
@@ -592,7 +617,7 @@ static const char *type_name(ValueType type) {
   case TYPE_FLOAT:
     return "num";
   case TYPE_STRING:
-    return "string";
+    return "str";
   case TYPE_ARRAY:
     return "array";
   case TYPE_STRUCT:
@@ -620,6 +645,14 @@ static int is_numeric(ValueType type) {
  * @return Non-zero if the value may be stored in the target
  */
 static int types_compatible(ValueType declared, ValueType given) {
+  if (given == TYPE_NULL) {
+    /* null fits any reference-like slot, never a number */
+    return declared == TYPE_STRING || declared == TYPE_STRUCT ||
+           declared == TYPE_CLASS || declared == TYPE_ARRAY;
+  }
+  if (declared == TYPE_NULL) {
+    return 0;
+  }
   if (declared == TYPE_STRING || given == TYPE_STRING) {
     return declared == TYPE_STRING && given == TYPE_STRING;
   }
@@ -645,6 +678,8 @@ static ValueType peek_type(Node *node) {
     return TYPE_FLOAT;
   case NODE_STRING_LITERAL:
     return TYPE_STRING;
+  case NODE_NULL:
+    return TYPE_NULL;
   case NODE_IDENTIFIER: {
     int slot = find_var(node->identifier.name);
     if (slot < 0) {
@@ -655,6 +690,15 @@ static ValueType peek_type(Node *node) {
   case NODE_FUNC_CALL: {
     if (strcmp(node->func_call.name, "input") == 0) {
       return TYPE_INT;
+    }
+    if (strcmp(node->func_call.name, "toStr") == 0) {
+      return TYPE_STRING;
+    }
+    if (strcmp(node->func_call.name, "toNum") == 0) {
+      return TYPE_FLOAT;
+    }
+    if (strcmp(node->func_call.name, "readFile") == 0) {
+      return TYPE_STRING;
     }
     for (int s = 0; s < sig_count; s++) {
       if (strcmp(sig_names[s], node->func_call.name) == 0) {
@@ -754,7 +798,7 @@ static ValueType peek_type(Node *node) {
       int m = find_method(c, node->method_call.method);
       if (m >= 0) {
         const char *rt = class_defs[c].methods[m].ret_type;
-        if (strcmp(rt, "string") == 0) {
+        if (strcmp(rt, "str") == 0) {
           return TYPE_STRING;
         }
         if (strcmp(rt, "bool") == 0) {
@@ -784,6 +828,8 @@ static ValueType expr_type(Node *node) {
     return TYPE_FLOAT;
   case NODE_STRING_LITERAL:
     return TYPE_STRING;
+  case NODE_NULL:
+    return TYPE_NULL;
   case NODE_IDENTIFIER: {
     int slot = require_var(node, node->identifier.name);
     return var_types[slot];
@@ -791,6 +837,15 @@ static ValueType expr_type(Node *node) {
   case NODE_FUNC_CALL: {
     if (strcmp(node->func_call.name, "input") == 0) {
       return TYPE_INT;
+    }
+    if (strcmp(node->func_call.name, "toStr") == 0) {
+      return TYPE_STRING;
+    }
+    if (strcmp(node->func_call.name, "toNum") == 0) {
+      return TYPE_FLOAT;
+    }
+    if (strcmp(node->func_call.name, "readFile") == 0) {
+      return TYPE_STRING;
     }
     for (int s = 0; s < sig_count; s++) {
       if (strcmp(sig_names[s], node->func_call.name) == 0) {
@@ -903,7 +958,7 @@ static ValueType expr_type(Node *node) {
       int m = find_method(c, node->method_call.method);
       if (m >= 0) {
         const char *rt = class_defs[c].methods[m].ret_type;
-        if (strcmp(rt, "string") == 0) {
+        if (strcmp(rt, "str") == 0) {
           return TYPE_STRING;
         }
         if (strcmp(rt, "bool") == 0) {
@@ -1346,61 +1401,52 @@ static void collect_strings(Node *node) {
 }
 
 /**
- * @brief Writes a raw string value as NASM db content
- * @param value Raw string value (may contain backslash-n)
+ * @brief Checks if a byte can appear verbatim inside a NASM quoted string
+ * @param c Byte to test
+ * @return Non-zero for printable ASCII except the quote character
+ * @details NASM treats the contents of "..." and '...' as verbatim, so
+ * backslashes need no escaping, but ' closes a single-quoted string
+ */
+static int nasm_verbatim_byte(unsigned char c) {
+  return c >= 0x20 && c <= 0x7E && c != '\'';
+}
+
+/**
+ * @brief Writes a string value as NASM db content
+ * @param value Raw string value (escapes already decoded by the lexer)
+ * @details Runs of printable bytes are emitted in a single-quoted NASM
+ * string; everything else (newline, tab, CR, quote, high bytes) is
+ * emitted as a numeric byte. No assembler-level escaping is used, so
+ * decoded escapes round-trip exactly.
  */
 static void write_nasm_string(const char *value) {
-  int in_quote = 0;
+  size_t len = strlen(value);
+  size_t i = 0;
   int first = 1;
-  for (size_t i = 0; value[i] != '\0';) {
-    if (value[i] == '\\' && value[i + 1] == 'n') {
-      if (in_quote) {
-        fprintf(out, "\"");
-        in_quote = 0;
-      }
+  while (i < len) {
+    size_t run = i;
+    while (run < len && nasm_verbatim_byte((unsigned char)value[run])) {
+      run++;
+    }
+    if (run > i) {
       if (!first) {
         fprintf(out, ", ");
       }
-      fprintf(out, "10");
+      fprintf(out, "'%.*s'", (int)(run - i), value + i);
       first = 0;
-      i += 2;
+      i = run;
       continue;
     }
-    if (value[i] == '\n') {
-      if (in_quote) {
-        fprintf(out, "\"");
-        in_quote = 0;
-      }
-      if (!first) {
-        fprintf(out, ", ");
-      }
-      if (!first) {
-        fprintf(out, ", ");
-      }
-      fprintf(out, "10");
-      first = 0;
-      i++;
-      continue;
+    if (!first) {
+      fprintf(out, ", ");
     }
-    if (!in_quote) {
-      if (!first) {
-        fprintf(out, ", ");
-      }
-      fprintf(out, "\"");
-      in_quote = 1;
-      first = 0;
-    }
-    if (value[i] == '"') {
-      fprintf(out, "\\\"");
-    } else if (value[i] == '\\') {
-      fprintf(out, "\\\\");
-    } else {
-      fprintf(out, "%c", value[i]);
-    }
+    fprintf(out, "%u", (unsigned)(unsigned char)value[i]);
+    first = 0;
     i++;
   }
-  if (in_quote) {
-    fprintf(out, "\"");
+  if (first) {
+    fprintf(out, "0");
+    return;
   }
   fprintf(out, ", 0");
 }
@@ -1423,6 +1469,9 @@ static void gen_data_section() {
   fprintf(out, "  fmt_index db \"index out of bounds\", 10, 0\n");
   fprintf(out, "  fmt_alloc db \"out of memory\", 10, 0\n");
   fprintf(out, "  fmt_null db \"null instance access\", 10, 0\n");
+  fprintf(out, "  fmt_open_r db \"rb\", 0\n");
+  fprintf(out, "  fmt_open_w db \"wb\", 0\n");
+  fprintf(out, "  fmt_openfail db \"could not open file\", 10, 0\n");
   fprintf(out, "  stack_floor dq 0\n");
   for (int i = 0; i < string_count; i++) {
     fprintf(out, "  str%d db ", i);
@@ -1496,7 +1545,7 @@ static void gen_input(Node *node) {
   if (prompt != NULL) {
     ValueType pt = expr_type(prompt);
     if (pt != TYPE_STRING) {
-      codegen_error(prompt, "input prompt must be a string, got %s",
+      codegen_error(prompt, "input prompt must be a str, got %s",
                     type_name(pt));
     }
     gen_expression(prompt);
@@ -1542,13 +1591,245 @@ static void gen_len(Node *node) {
   }
   ValueType given = expr_type(arg);
   if (given != TYPE_STRING) {
-    codegen_error(arg, "len expects a string, got %s", type_name(given));
+    codegen_error(arg, "len expects a str, got %s", type_name(given));
   }
   gen_expression(arg);
   fprintf(out, "  mov rcx, rax\n");
   gen_runtime_prologue();
   fprintf(out, "  call strlen\n");
   gen_runtime_epilogue();
+}
+
+/**
+ * @brief Generates toStr(num), result is a heap string pointer in rax
+ * @param node Call node (exactly 1 num argument)
+ * @details Formats into a malloc'd buffer with snprintf and returns the
+ * buffer, so the result concatenates like any other string
+ */
+static void gen_to_str(Node *node) {
+  Node *arg = node->func_call.args;
+  int arg_count = 0;
+  for (Node *a = arg; a != NULL; a = a->right) {
+    arg_count++;
+  }
+  if (arg_count != 1) {
+    codegen_error(node, "toStr takes exactly 1 argument");
+  }
+  ValueType given = expr_type(arg);
+  if (!is_numeric(given)) {
+    codegen_error(arg, "toStr expects a num, got %s", type_name(given));
+  }
+  int is_float = (given == TYPE_FLOAT);
+  gen_expression(arg);
+  /* num value arrives in rax (double bits for float); keep it safe across
+     the malloc call by spilling to a private slot first. */
+  fprintf(out, "  sub rsp, 64\n");
+  fprintf(out, "  mov [rsp + 0], rax\n");
+  fprintf(out, "  mov rcx, 64\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call malloc\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz alloc_trap\n");
+  fprintf(out, "  mov [rsp + 8], rax\n");
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  fprintf(out, "  mov rdx, 64\n");
+  fprintf(out, "  lea r8, [rel %s]\n",
+          is_float ? "fmt_float_raw" : "fmt_int_raw");
+  if (is_float) {
+    fprintf(out, "  mov r9, [rsp + 0]\n");
+    fprintf(out, "  movq xmm3, [rsp + 0]\n");
+    fprintf(out, "  mov eax, 4\n");
+  } else {
+    fprintf(out, "  mov r9, [rsp + 0]\n");
+    fprintf(out, "  xor eax, eax\n");
+  }
+  fprintf(out, "  mov [rsp + 16], rax\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call snprintf\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov rax, [rsp + 8]\n");
+  fprintf(out, "  add rsp, 64\n");
+}
+
+/**
+ * @brief Generates toNum(str), result left in rax as double bits
+ * @param node Call node (exactly 1 str argument)
+ */
+static void gen_to_num(Node *node) {
+  Node *arg = node->func_call.args;
+  int arg_count = 0;
+  for (Node *a = arg; a != NULL; a = a->right) {
+    arg_count++;
+  }
+  if (arg_count != 1) {
+    codegen_error(node, "toNum takes exactly 1 argument");
+  }
+  ValueType given = expr_type(arg);
+  if (given != TYPE_STRING) {
+    codegen_error(arg, "toNum expects a str, got %s", type_name(given));
+  }
+  gen_expression(arg);
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  mov rcx, rax\n");
+  fprintf(out, "  xor edx, edx\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call strtod\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  movq rax, xmm0\n");
+}
+
+/**
+ * @brief Generates readFile(path), result is a heap string pointer in rax
+ * @param node Call node (exactly 1 str argument)
+ * @details Opens in binary mode, reads the whole file, NUL terminates.
+ * Values live in a private spill area because the runtime prologue
+ * clobbers rax.
+ */
+static void gen_read_file(Node *node) {
+  Node *arg = node->func_call.args;
+  int arg_count = 0;
+  for (Node *a = arg; a != NULL; a = a->right) {
+    arg_count++;
+  }
+  if (arg_count != 1) {
+    codegen_error(node, "readFile takes exactly 1 argument");
+  }
+  ValueType given = expr_type(arg);
+  if (given != TYPE_STRING) {
+    codegen_error(arg, "readFile expects a str path, got %s", type_name(given));
+  }
+  gen_expression(arg);
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  sub rsp, 64\n");
+  fprintf(out, "  mov [rsp + 0], rax\n");
+  /* fopen(path, "rb") */
+  fprintf(out, "  mov rcx, [rsp + 0]\n");
+  fprintf(out, "  lea rdx, [rel fmt_open_r]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fopen\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz open_trap\n");
+  fprintf(out, "  mov [rsp + 8], rax\n");
+  /* fseek(fp, 0, SEEK_END) */
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  fprintf(out, "  xor edx, edx\n");
+  fprintf(out, "  mov r8d, 2\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fseek\n");
+  gen_runtime_epilogue();
+  /* size = (long)ftell(fp) */
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call ftell\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  movsxd rax, eax\n");
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  js open_trap\n");
+  fprintf(out, "  mov [rsp + 16], rax\n");
+  /* buf = malloc(size + 1) */
+  fprintf(out, "  mov rcx, [rsp + 16]\n");
+  fprintf(out, "  add rcx, 1\n");
+  fprintf(out, "  jo overflow_trap\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call malloc\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz alloc_trap\n");
+  fprintf(out, "  mov [rsp + 24], rax\n");
+  /* fread(buf, 1, size, fp) after rewinding to the start */
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  fprintf(out, "  xor edx, edx\n");
+  fprintf(out, "  xor r8d, r8d\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fseek\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov rcx, [rsp + 24]\n");
+  fprintf(out, "  mov rdx, 1\n");
+  fprintf(out, "  mov r8, [rsp + 16]\n");
+  fprintf(out, "  mov r9, [rsp + 8]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fread\n");
+  gen_runtime_epilogue();
+  /* fclose(fp) */
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fclose\n");
+  gen_runtime_epilogue();
+  /* buf[size] = 0 */
+  fprintf(out, "  mov rcx, [rsp + 24]\n");
+  fprintf(out, "  mov rdx, [rsp + 16]\n");
+  fprintf(out, "  mov byte [rcx + rdx], 0\n");
+  fprintf(out, "  mov rax, [rsp + 24]\n");
+  fprintf(out, "  add rsp, 64\n");
+}
+
+/**
+ * @brief Generates writeFile(path, text), result is bytes written in rax
+ * @param node Call node (exactly 2 str arguments)
+ */
+static void gen_write_file(Node *node) {
+  Node *path = node->func_call.args;
+  int arg_count = 0;
+  for (Node *a = path; a != NULL; a = a->right) {
+    arg_count++;
+  }
+  if (arg_count != 2) {
+    codegen_error(node, "writeFile takes exactly 2 arguments");
+  }
+  ValueType ptype = expr_type(path);
+  if (ptype != TYPE_STRING) {
+    codegen_error(path, "writeFile expects a str path, got %s",
+                  type_name(ptype));
+  }
+  Node *text = path->right;
+  ValueType ttype = expr_type(text);
+  if (ttype != TYPE_STRING) {
+    codegen_error(text, "writeFile expects str text, got %s", type_name(ttype));
+  }
+  gen_expression(path);
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  sub rsp, 64\n");
+  fprintf(out, "  mov [rsp + 0], rax\n");
+  gen_expression(text);
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  mov [rsp + 8], rax\n");
+  /* len = strlen(text) */
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call strlen\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov [rsp + 16], rax\n");
+  /* fp = fopen(path, "wb") */
+  fprintf(out, "  mov rcx, [rsp + 0]\n");
+  fprintf(out, "  lea rdx, [rel fmt_open_w]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fopen\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz open_trap\n");
+  fprintf(out, "  mov [rsp + 24], rax\n");
+  /* fwrite(text, 1, len, fp) */
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  fprintf(out, "  mov rdx, 1\n");
+  fprintf(out, "  mov r8, [rsp + 16]\n");
+  fprintf(out, "  mov r9, [rsp + 24]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fwrite\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov [rsp + 32], rax\n");
+  /* fclose(fp) */
+  fprintf(out, "  mov rcx, [rsp + 24]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call fclose\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov rax, [rsp + 32]\n");
+  fprintf(out, "  add rsp, 64\n");
 }
 
 /**
@@ -1569,6 +1850,22 @@ static void gen_call(Node *node) {
   }
   if (strcmp(node->func_call.name, "len") == 0) {
     gen_len(node);
+    return;
+  }
+  if (strcmp(node->func_call.name, "toStr") == 0) {
+    gen_to_str(node);
+    return;
+  }
+  if (strcmp(node->func_call.name, "toNum") == 0) {
+    gen_to_num(node);
+    return;
+  }
+  if (strcmp(node->func_call.name, "readFile") == 0) {
+    gen_read_file(node);
+    return;
+  }
+  if (strcmp(node->func_call.name, "writeFile") == 0) {
+    gen_write_file(node);
     return;
   }
   for (int s = 0; s < sig_count; s++) {
@@ -1860,7 +2157,7 @@ static void gen_new(Node *node) {
   int c = find_class(type);
   if (s < 0 && c < 0) {
     if (strcmp(type, "num") == 0 || strcmp(type, "bool") == 0 ||
-        strcmp(type, "string") == 0 || strcmp(type, "array") == 0) {
+        strcmp(type, "str") == 0 || strcmp(type, "array") == 0) {
       codegen_error(node, "Only structs and classes can be created with 'new'");
     }
     codegen_error(node, "Unknown struct or class '%s'", type);
@@ -1884,8 +2181,8 @@ static void gen_new(Node *node) {
     ValueType want = fields[i].type;
     if (want == TYPE_STRING) {
       if (given != TYPE_STRING) {
-        codegen_error(a, "Cannot assign %s to string field '%s'",
-                      type_name(given), fields[i].name);
+        codegen_error(a, "Cannot assign %s to str field '%s'", type_name(given),
+                      fields[i].name);
       }
     } else if (!is_numeric(given)) {
       codegen_error(a, "Cannot assign %s to num field '%s'", type_name(given),
@@ -2072,6 +2369,9 @@ static void gen_expression(Node *node) {
   case NODE_METHOD_CALL:
     gen_method_call(node);
     break;
+  case NODE_NULL:
+    fprintf(out, "  xor eax, eax\n");
+    break;
   case NODE_ARRAY_LITERAL:
     codegen_error(node, "Array literal not supported in codegen expression");
     break;
@@ -2081,6 +2381,25 @@ static void gen_expression(Node *node) {
     ValueType right_type = peek_type(node->binary_op.right);
     int left_is_str = (left_type == TYPE_STRING);
     int right_is_str = (right_type == TYPE_STRING);
+    /* null comparisons are plain 64-bit pointer compares */
+    if (left_type == TYPE_NULL || right_type == TYPE_NULL) {
+      if (strcmp(op, "==") != 0 && strcmp(op, "!=") != 0) {
+        codegen_error(node, "Operator '%s' cannot be applied to null", op);
+      }
+      gen_expression(node->binary_op.left);
+      fprintf(out, "  push rax\n");
+      gen_expression(node->binary_op.right);
+      fprintf(out, "  mov rbx, rax\n");
+      fprintf(out, "  pop rax\n");
+      fprintf(out, "  cmp rax, rbx\n");
+      if (strcmp(op, "==") == 0) {
+        fprintf(out, "  sete al\n");
+      } else {
+        fprintf(out, "  setne al\n");
+      }
+      fprintf(out, "  movzx rax, al\n");
+      break;
+    }
     if (left_is_str || right_is_str) {
       if (strcmp(op, "+") == 0) {
         if (!left_is_str || !right_is_str) {
@@ -2576,6 +2895,8 @@ static void gen_statement(Node *node) {
         } else if (given == TYPE_INT &&
                    node->var_decl.value->type == NODE_FUNC_CALL) {
           given = declared;
+        } else if (given == TYPE_NULL) {
+          given = declared;
         } else {
           codegen_error(node->var_decl.value, "Cannot assign %s to %s '%s'",
                         type_name(given), declared_kind, node->var_decl.name);
@@ -2599,8 +2920,10 @@ static void gen_statement(Node *node) {
     }
     if (has_value) {
       if (declared == TYPE_STRUCT || declared == TYPE_CLASS) {
-        if (node->var_decl.value->type == NODE_NEW ||
-            node->var_decl.value->type == NODE_FUNC_CALL) {
+        if (given == TYPE_NULL) {
+          fprintf(out, "  mov QWORD [rbp - %d], 0\n", (slot + 1) * 8);
+        } else if (node->var_decl.value->type == NODE_NEW ||
+                   node->var_decl.value->type == NODE_FUNC_CALL) {
           gen_expression(node->var_decl.value);
           fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
         } else if (node->var_decl.value->type == NODE_IDENTIFIER) {
@@ -2662,7 +2985,9 @@ static void gen_statement(Node *node) {
     ValueType given = expr_type(node->assignment.value);
     if (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS) {
       const char *kind = var_type_name[slot];
-      if (node->assignment.value->type == NODE_NEW) {
+      if (given == TYPE_NULL) {
+        fprintf(out, "  mov QWORD [rbp - %d], 0\n", (slot + 1) * 8);
+      } else if (node->assignment.value->type == NODE_NEW) {
         if (strcmp(node->assignment.value->new_expr.type_name, kind) != 0) {
           codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
                         node->assignment.value->new_expr.type_name, kind,
@@ -2807,7 +3132,7 @@ static void gen_statement(Node *node) {
   case NODE_SUB_ASSIGN: {
     int slot = require_var(node, node->sub_assign.name);
     if (var_types[slot] == TYPE_STRING) {
-      codegen_error(node, "Operator '-=' cannot be applied to string");
+      codegen_error(node, "Operator '-=' cannot be applied to str");
     }
     if (!is_numeric(var_types[slot])) {
       codegen_error(node, "Cannot use -= on non-numeric type '%s'",
@@ -2959,11 +3284,11 @@ static void gen_statement(Node *node) {
       (void)checked;
     }
     if (field_type == TYPE_STRING && strcmp(op, "-=") == 0) {
-      codegen_error(node, "Operator '-=' cannot be applied to string");
+      codegen_error(node, "Operator '-=' cannot be applied to str");
     }
     if (field_type == TYPE_STRING && given != TYPE_STRING) {
       if (strcmp(op, "=") == 0) {
-        codegen_error(value, "Cannot assign %s to string field '%s'",
+        codegen_error(value, "Cannot assign %s to str field '%s'",
                       type_name(given), member);
       }
       codegen_error(value, "Cannot concatenate string with %s",
@@ -2999,7 +3324,7 @@ static void gen_statement(Node *node) {
     }
     if (field_type == TYPE_STRING) {
       if (strcmp(op, "-=") == 0) {
-        codegen_error(node, "Operator '-=' cannot be applied to string");
+        codegen_error(node, "Operator '-=' cannot be applied to str");
       }
       if (this_field) {
         int tslot = find_var("this ");
@@ -3156,7 +3481,7 @@ static void gen_statement(Node *node) {
         ValueType checked = expr_type(node->return_stmt.value);
         (void)checked;
       }
-      if (strcmp(rt, "string") == 0) {
+      if (strcmp(rt, "str") == 0) {
         if (given != TYPE_STRING) {
           codegen_error(node->return_stmt.value,
                         "Method '%s' must return string, got %s", mname,
@@ -3220,11 +3545,33 @@ static void gen_statement(Node *node) {
   case NODE_WHILE: {
     int loop_label = label_id++;
     int end_label = label_id++;
-    fprintf(out, "loop%d:\n", loop_label);
+    if (loop_depth >= MAX_LOOP_DEPTH) {
+      codegen_error(node, "Loops nested too deeply");
+    }
+    loop_break_label[loop_depth] = end_label;
+    /* continue re-runs the condition, so it targets the loop head */
+    loop_continue_label[loop_depth] = loop_label;
+    loop_depth++;
+    fprintf(out, "label%d:\n", loop_label);
     gen_condition_jump(node->while_stmt.condition, end_label);
     gen_block(node->while_stmt.body);
-    fprintf(out, "  jmp loop%d\n", loop_label);
+    fprintf(out, "  jmp label%d\n", loop_label);
     fprintf(out, "label%d:\n", end_label);
+    loop_depth--;
+    break;
+  }
+  case NODE_BREAK: {
+    if (loop_depth <= 0) {
+      codegen_error(node, "break outside of a loop");
+    }
+    fprintf(out, "  jmp label%d\n", loop_break_label[loop_depth - 1]);
+    break;
+  }
+  case NODE_CONTINUE: {
+    if (loop_depth <= 0) {
+      codegen_error(node, "continue outside of a loop");
+    }
+    fprintf(out, "  jmp label%d\n", loop_continue_label[loop_depth - 1]);
     break;
   }
   case NODE_FUNC_CALL:
@@ -3335,6 +3682,13 @@ static void gen_statement(Node *node) {
     int count = array_len[arr];
     int loop_label = label_id++;
     int end_label = label_id++;
+    int cont_label = label_id++;
+    if (loop_depth >= MAX_LOOP_DEPTH) {
+      codegen_error(node, "Loops nested too deeply");
+    }
+    loop_break_label[loop_depth] = end_label;
+    loop_continue_label[loop_depth] = cont_label;
+    loop_depth++;
     fprintf(out, "  push r12\n");
     fprintf(out, "  xor r12d, r12d\n");
     fprintf(out, "loop%d:\n", loop_label);
@@ -3343,10 +3697,12 @@ static void gen_statement(Node *node) {
     fprintf(out, "  mov rax, [rbp - %d + r12*8]\n", (base + count) * 8);
     fprintf(out, "  mov [rbp - %d], rax\n", (var_slot + 1) * 8);
     gen_block(node->for_stmt.body);
+    fprintf(out, "label%d:\n", cont_label);
     fprintf(out, "  inc r12\n");
     fprintf(out, "  jmp loop%d\n", loop_label);
     fprintf(out, "label%d:\n", end_label);
     fprintf(out, "  pop r12\n");
+    loop_depth--;
     var_count = saved;
     array_count = saved_arrays;
     break;
@@ -3548,6 +3904,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   frame_size = 2048;
   in_function = 0;
   in_method = 0;
+  loop_depth = 0;
   cur_class = -1;
   cur_method = -1;
   no_param_warn = 0;
@@ -3611,7 +3968,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
         d->fields[d->nfields].name = malloc(fl + 1);
         memcpy(d->fields[d->nfields].name, f->var_decl.name, fl);
         d->fields[d->nfields].name[fl] = '\0';
-        if (strcmp(f->var_decl.var_type, "string") == 0) {
+        if (strcmp(f->var_decl.var_type, "str") == 0) {
           d->fields[d->nfields].type = TYPE_STRING;
         } else if (strcmp(f->var_decl.var_type, "bool") == 0) {
           d->fields[d->nfields].type = TYPE_BOOL;
@@ -3655,7 +4012,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
         d->fields[d->nfields].name = malloc(fl + 1);
         memcpy(d->fields[d->nfields].name, f->var_decl.name, fl);
         d->fields[d->nfields].name[fl] = '\0';
-        if (strcmp(f->var_decl.var_type, "string") == 0) {
+        if (strcmp(f->var_decl.var_type, "str") == 0) {
           d->fields[d->nfields].type = TYPE_STRING;
         } else if (strcmp(f->var_decl.var_type, "bool") == 0) {
           d->fields[d->nfields].type = TYPE_BOOL;
@@ -3671,8 +4028,8 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
         }
         if (strcmp(m->method_def.ret_type, "num") != 0 &&
             strcmp(m->method_def.ret_type, "bool") != 0 &&
-            strcmp(m->method_def.ret_type, "string") != 0) {
-          collect_error(m, "Method '%s' must return num, bool or string",
+            strcmp(m->method_def.ret_type, "str") != 0) {
+          collect_error(m, "Method '%s' must return num, bool or str",
                         m->method_def.name);
         }
         size_t ml = strlen(m->method_def.name);
@@ -3762,6 +4119,14 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   fprintf(out, "extern strcmp\n");
   fprintf(out, "extern memcpy\n");
   fprintf(out, "extern fflush\n");
+  fprintf(out, "extern snprintf\n");
+  fprintf(out, "extern strtod\n");
+  fprintf(out, "extern fopen\n");
+  fprintf(out, "extern fseek\n");
+  fprintf(out, "extern ftell\n");
+  fprintf(out, "extern fread\n");
+  fprintf(out, "extern fwrite\n");
+  fprintf(out, "extern fclose\n");
   gen_data_section();
   fprintf(out, "section .text\n");
 
@@ -3810,6 +4175,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   gen_trap("index_trap", "fmt_index");
   gen_trap("alloc_trap", "fmt_alloc");
   gen_trap("null_trap", "fmt_null");
+  gen_trap("open_trap", "fmt_openfail");
 
   fclose(out);
 }

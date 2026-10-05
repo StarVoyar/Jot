@@ -1,7 +1,7 @@
 fn public main() {
-  string a = "hello";
-  string b = " world";
-  string c = a + b;
+  str a = "hello";
+  str b = " world";
+  str c = a + b;
   print(c);
   print("\n");
   a += "!";

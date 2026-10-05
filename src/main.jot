@@ -1,12 +1,12 @@
 struct private object {
   num size;
-  string label;
+  str label;
 }
 
 class public dog {
   num age;
 
-  string describe() {
+  str describe() {
     print("age={self.age}\n");
     return("done");
   }
@@ -16,7 +16,7 @@ fn public main() {
   num x = 2;
   num y = x + 4;
   print("Y: {y} \n");
-  string greeting = "hello" + " jot";
+  str greeting = "hello" + " jot";
   print(greeting);
   print("\n");
   print(len(greeting));

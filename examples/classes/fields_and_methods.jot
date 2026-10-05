@@ -1,8 +1,8 @@
 class public dog {
   num age;
-  string name;
+  str name;
 
-  string describe() {
+  str describe() {
     print("age={self.age} name={self.name}\n");
     return(self.name);
   }

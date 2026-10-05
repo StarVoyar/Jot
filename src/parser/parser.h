@@ -38,7 +38,10 @@ typedef enum {
   NODE_NEW,            /**< Struct/class instantiation (new Type(args)) */
   NODE_INDEX,          /**< String indexing (base[index]) */
   NODE_METHOD_CALL,    /**< Method call (object.method(args)) */
-  NODE_MEMBER_ASSIGN   /**< Member assignment (object.member = value) */
+  NODE_MEMBER_ASSIGN,  /**< Member assignment (object.member = value) */
+  NODE_BREAK,          /**< break (inside a loop) */
+  NODE_CONTINUE,       /**< continue (inside a loop) */
+  NODE_NULL            /**< null literal (no reference) */
 } NodeType;
 
 /**

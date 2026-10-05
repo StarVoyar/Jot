@@ -1,6 +1,6 @@
 class public dog {
-  string bark() {
-    string sound = "BARK!";
+  str bark() {
+    str sound = "BARK!";
     return(sound);
   }
 }
@@ -8,7 +8,7 @@ class public dog {
 fn public main() {
   dog d = new dog();
   d.bark();
-  string s = d.bark();
+  str s = d.bark();
   print(s);
   print("\n");
   return(0);

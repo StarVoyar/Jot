@@ -861,6 +861,30 @@ static Node *parse_primary_base() {
       strcmp(current_token->value, "new") == 0) {
     return parse_new_expr();
   }
+  if (current_token->type == KEYWORD &&
+      strcmp(current_token->value, "null") == 0) {
+    Node *node = create_node(NODE_NULL);
+    current_token++;
+    return node;
+  }
+  /* Unary minus, so negative literals like -17 parse. Modelled as 0 - x
+     so the existing numeric codegen and type inference handle it. */
+  if (current_token->type == OPERATOR &&
+      strcmp(current_token->value, "-") == 0) {
+    Node *minus = create_node(NODE_BINARY_OP);
+    minus->binary_op.op = malloc(2);
+    memcpy(minus->binary_op.op, "-", 2);
+    Node *zero = create_node(NODE_INT_LITERAL);
+    zero->int_literal.value = 0;
+    current_token++;
+    Node *operand = parse_primary_base();
+    if (operand == NULL) {
+      return NULL;
+    }
+    minus->binary_op.left = zero;
+    minus->binary_op.right = operand;
+    return minus;
+  }
   if (current_token->type == INT) {
     return parse_int_literal();
   } else if (current_token->type == FLOAT) {
@@ -1666,6 +1690,10 @@ static Node *clone_node(Node *node) {
     memcpy(copy->member_access.member, node->member_access.member, len);
     copy->member_access.member[len] = '\0';
     break;
+  case NODE_BREAK:
+  case NODE_CONTINUE:
+  case NODE_NULL:
+    break;
   case NODE_STRUCT_DEF:
     len = strlen(node->struct_def.name);
     copy->struct_def.name = malloc(len + 1);
@@ -2106,6 +2134,21 @@ static void warn_missing_visibility(const char *kind, const char *name,
 }
 
 /**
+ * @brief Parses a break or continue statement
+ * @return AST node for the jump statement
+ */
+static Node *parse_break_or_continue(int is_break) {
+  Node *node = create_node(is_break ? NODE_BREAK : NODE_CONTINUE);
+  current_token++;
+  if (current_token->type == END_OF_TOKENS ||
+      strcmp(current_token->value, ";") != 0) {
+    parse_error_expected("Expected ';' after statement\n");
+  }
+  current_token++;
+  return node;
+}
+
+/**
  * @brief Parses a struct definition
  * @return AST node for struct definition (current token is 'struct')
  */
@@ -2149,9 +2192,9 @@ static Node *parse_struct_def() {
     if (current_token->type != KEYWORD ||
         (strcmp(current_token->value, "num") != 0 &&
          strcmp(current_token->value, "bool") != 0 &&
-         strcmp(current_token->value, "string") != 0)) {
+         strcmp(current_token->value, "str") != 0)) {
       parse_error_expected(
-          "Expected field type (num, bool or string) in struct\n");
+          "Expected field type (num, bool or str) in struct\n");
     }
     Node *field = create_node(NODE_VAR_DECL);
     len = strlen(current_token->value);
@@ -2231,7 +2274,11 @@ static Node *parse_method_def() {
   node->method_def.name[len] = '\0';
   check_reserved_ident(node->method_def.name);
   if (strcmp(node->method_def.name, "input") == 0 ||
-      strcmp(node->method_def.name, "len") == 0) {
+      strcmp(node->method_def.name, "len") == 0 ||
+      strcmp(node->method_def.name, "toStr") == 0 ||
+      strcmp(node->method_def.name, "toNum") == 0 ||
+      strcmp(node->method_def.name, "readFile") == 0 ||
+      strcmp(node->method_def.name, "writeFile") == 0) {
     parse_error("Method name is reserved\n");
   }
   current_token++;
@@ -2251,7 +2298,7 @@ static Node *parse_method_def() {
       if (current_token->type == KEYWORD &&
           (strcmp(current_token->value, "num") == 0 ||
            strcmp(current_token->value, "bool") == 0 ||
-           strcmp(current_token->value, "string") == 0 ||
+           strcmp(current_token->value, "str") == 0 ||
            strcmp(current_token->value, "array") == 0)) {
         param = create_node(NODE_VAR_DECL);
         len = strlen(current_token->value);
@@ -2402,9 +2449,9 @@ static Node *parse_class_def() {
     if (current_token->type != KEYWORD ||
         (strcmp(current_token->value, "num") != 0 &&
          strcmp(current_token->value, "bool") != 0 &&
-         strcmp(current_token->value, "string") != 0)) {
+         strcmp(current_token->value, "str") != 0)) {
       parse_error_expected(
-          "Expected field or method type (num, bool or string) in class\n");
+          "Expected field or method type (num, bool or str) in class\n");
     }
     if (current_token[1].value == NULL || current_token[1].type != IDENTIFIER) {
       parse_error_expected("Expected field or method name in class\n");
@@ -2544,7 +2591,11 @@ static Node *parse_function() {
   memcpy(node->function.name, current_token->value, len);
   node->function.name[len] = '\0';
   if (strcmp(node->function.name, "input") == 0 ||
-      strcmp(node->function.name, "len") == 0) {
+      strcmp(node->function.name, "len") == 0 ||
+      strcmp(node->function.name, "toStr") == 0 ||
+      strcmp(node->function.name, "toNum") == 0 ||
+      strcmp(node->function.name, "readFile") == 0 ||
+      strcmp(node->function.name, "writeFile") == 0) {
     parse_error("Function name is reserved, use another name\n");
   }
   check_reserved_ident(node->function.name);
@@ -2572,7 +2623,7 @@ static Node *parse_function() {
       if (current_token->type == KEYWORD &&
           (strcmp(current_token->value, "num") == 0 ||
            strcmp(current_token->value, "bool") == 0 ||
-           strcmp(current_token->value, "string") == 0 ||
+           strcmp(current_token->value, "str") == 0 ||
            strcmp(current_token->value, "array") == 0)) {
         param = create_node(NODE_VAR_DECL);
         len = strlen(current_token->value);
@@ -2857,7 +2908,7 @@ static Node *parse_statement() {
       return parse_print();
     } else if (strcmp(current_token->value, "num") == 0 ||
                strcmp(current_token->value, "bool") == 0 ||
-               strcmp(current_token->value, "string") == 0) {
+               strcmp(current_token->value, "str") == 0) {
       return parse_var_decl();
     } else if (strcmp(current_token->value, "array") == 0) {
       return parse_array_decl();
@@ -2867,6 +2918,10 @@ static Node *parse_statement() {
       return parse_struct_def();
     } else if (strcmp(current_token->value, "class") == 0) {
       return parse_class_def();
+    } else if (strcmp(current_token->value, "break") == 0) {
+      return parse_break_or_continue(1);
+    } else if (strcmp(current_token->value, "continue") == 0) {
+      return parse_break_or_continue(0);
     }
   } else if (current_token->type == IDENTIFIER) {
     if (strcmp(current_token->value, "from") == 0 &&
@@ -2974,7 +3029,11 @@ Node *Parser(Token *tokens, const char *filename) {
       collect_calls(s, calls, &call_count, 1024);
       for (int k = 0; k < call_count; k++) {
         if (strcmp(calls[k]->func_call.name, "input") == 0 ||
-            strcmp(calls[k]->func_call.name, "len") == 0) {
+            strcmp(calls[k]->func_call.name, "len") == 0 ||
+            strcmp(calls[k]->func_call.name, "toStr") == 0 ||
+            strcmp(calls[k]->func_call.name, "toNum") == 0 ||
+            strcmp(calls[k]->func_call.name, "readFile") == 0 ||
+            strcmp(calls[k]->func_call.name, "writeFile") == 0) {
           continue;
         }
         Node *def = find_function_in(program_head, calls[k]->func_call.name);
@@ -3132,6 +3191,15 @@ void print_tree(Node *root) {
   case NODE_MEMBER_ACCESS:
     printf("Member(%s.%s)", root->member_access.object,
            root->member_access.member);
+    break;
+  case NODE_BREAK:
+    printf("Break");
+    break;
+  case NODE_CONTINUE:
+    printf("Continue");
+    break;
+  case NODE_NULL:
+    printf("Null");
     break;
   case NODE_STRUCT_DEF:
     printf("Struct(%s %s, fields: ",
