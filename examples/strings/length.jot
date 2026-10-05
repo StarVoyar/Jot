@@ -1,0 +1,10 @@
+fn public main() {
+  print(len("hello"));
+  print("\n");
+  string empty = "";
+  print(len(empty));
+  print("\n");
+  return(0);
+}
+
+main();

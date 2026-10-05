@@ -2,6 +2,7 @@
 
 /* Declared in lexer.h (not included: windows.h clashes with TokenType) */
 const char *lexer_source_line(int line, int *out_len);
+const char *lexer_source_line_in(const char *file, int line, int *out_len);
 
 #ifdef _WIN32
 #include <io.h>
@@ -43,8 +44,27 @@ int terminal_setup_colors(void) {
  * @param width Squiggle width in characters, at least 1
  * @param message Diagnostic message without the kind prefix
  */
+/** Number of errors reported so far in this process */
+static int term_error_count = 0;
+
+/** Number of warnings reported so far in this process */
+static int term_warning_count = 0;
+
+void term_tally(TermLevel level) {
+  if (level == TERM_ERROR) {
+    term_error_count++;
+  } else {
+    term_warning_count++;
+  }
+}
+
+int term_errors(void) { return term_error_count; }
+
+int term_warnings(void) { return term_warning_count; }
+
 void term_report(TermLevel level, const char *filename, int line, int col,
                  int width, const char *message) {
+  term_tally(level);
   size_t len = strlen(message);
   if (len > 0 && message[len - 1] == '\n') {
     len--;
@@ -76,7 +96,10 @@ void term_report(TermLevel level, const char *filename, int line, int col,
   fprintf(stdout, "  --> %s:%d:%d\n", filename, line, col);
 
   int text_len = 0;
-  const char *text = lexer_source_line(line, &text_len);
+  const char *text = lexer_source_line_in(filename, line, &text_len);
+  if (text == NULL) {
+    text = lexer_source_line(line, &text_len);
+  }
   if (text != NULL) {
     fprintf(stdout, "     |\n");
     fprintf(stdout, "%4d | ", line);

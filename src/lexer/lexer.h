@@ -112,6 +112,21 @@ void free_tokens(Token *tokens);
 const char *lexer_source_line(int line, int *out_len);
 
 /**
+ * @brief Returns the text of a source line from a specific loaded file
+ * @param file File name previously passed to lexer_set_file_name
+ * @param line 1-based line number
+ * @param out_len Receives line length without newline, may be NULL
+ * @return Pointer into that file's buffer, NULL if unknown or out of range
+ */
+const char *lexer_source_line_in(const char *file, int line, int *out_len);
+
+/**
+ * @brief Names the file the next Lexer call will read, for error snippets
+ * @param file Source file name, borrowed for the process lifetime
+ */
+void lexer_set_file_name(const char *file);
+
+/**
  * @brief Snapshot of lexer state for nested file parsing
  */
 typedef struct {

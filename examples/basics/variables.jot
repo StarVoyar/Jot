@@ -1,8 +1,8 @@
-fn main(num argc) {
+fn public main() {
   num x = 2;
   num y = x + 4;
   print("Y: {y} \n");
   return(1);
 }
 
-main(0);
+main();

@@ -22,8 +22,56 @@ typedef enum {
   TYPE_FLOAT,  /**< Floating point values */
   TYPE_BOOL,   /**< Comparison results */
   TYPE_STRING, /**< String pointers */
-  TYPE_ARRAY   /**< Arrays (not first-class values) */
+  TYPE_ARRAY,  /**< Arrays (not first-class values) */
+  TYPE_STRUCT, /**< Struct instance (heap pointer) */
+  TYPE_CLASS   /**< Class instance (heap pointer) */
 } ValueType;
+
+/** Maximum fields per struct/class */
+#define MAX_FIELDS 32
+
+/** Maximum methods per class */
+#define MAX_METHODS 32
+
+/** Maximum struct definitions per program */
+#define MAX_STRUCTS 64
+
+/** Maximum class definitions per program */
+#define MAX_CLASSES 64
+
+/** A struct/class field (num is stored as canonical double) */
+typedef struct {
+  char *name;     /**< Field name */
+  ValueType type; /**< TYPE_FLOAT for num, TYPE_BOOL, TYPE_STRING */
+} FieldDef;
+
+/** A class method (stored AST, emitted with mangled label) */
+typedef struct {
+  char *name;     /**< Method name */
+  char *ret_type; /**< Declared return type keyword */
+  Node *params;   /**< Parameter list (linked via right) */
+  Node *body;     /**< Method body (linked via right) */
+  int line;       /**< Definition line for diagnostics */
+  int col;        /**< Definition column for diagnostics */
+} MethodDef;
+
+/** A struct definition */
+typedef struct {
+  char *name;                  /**< Struct name */
+  int is_public;               /**< Non-zero if importable */
+  int nfields;                 /**< Field count */
+  FieldDef fields[MAX_FIELDS]; /**< Field list */
+} StructDef;
+
+/** A class definition */
+typedef struct {
+  char *name;                     /**< Class name */
+  int is_public;                  /**< Non-zero if importable */
+  int nfields;                    /**< Field count */
+  FieldDef fields[MAX_FIELDS];    /**< Field list */
+  int nmethods;                   /**< Method count */
+  MethodDef methods[MAX_METHODS]; /**< Method list */
+} ClassDef;
 
 /** Variable names in the current function frame */
 static char *var_names[256];
@@ -45,6 +93,12 @@ static int var_col[256];
 
 /** Number of variables in the current frame */
 static int var_count;
+
+/** Struct/class name for TYPE_STRUCT/TYPE_CLASS variables, else NULL */
+static char *var_type_name[256];
+
+/** Non-zero suppresses bare-parameter warnings (for self.p writes) */
+static int no_param_warn;
 
 /** Array names in the current frame */
 static char *array_names[64];
@@ -85,6 +139,27 @@ static int sig_param_float[256][32];
 /** Non-zero if function returns only comparisons (bool), never floats */
 static int sig_is_bool_only[256];
 
+/** Struct definitions for this program */
+static StructDef struct_defs[MAX_STRUCTS];
+
+/** Number of struct definitions */
+static int struct_count;
+
+/** Class definitions for this program */
+static ClassDef class_defs[MAX_CLASSES];
+
+/** Number of class definitions */
+static int class_count;
+
+/** Non-zero while generating a class method body */
+static int in_method;
+
+/** Class index of the method being generated, -1 when not in a method */
+static int cur_class;
+
+/** Method index of the method being generated, -1 when not in a method */
+static int cur_method;
+
 /** Forward declaration for recursive generation */
 static void gen_expression(Node *node);
 
@@ -97,13 +172,25 @@ static void gen_block(Node *list);
 /** Forward declaration for float param scan */
 static void scan_float_calls(Node *node);
 
+/** Forward declaration for call argument checking */
+static void check_call_arg(Node *arg, ValueType want, const char *want_kind);
+
+/** Forward declaration for method calls (result left in rax) */
+static void gen_method_call(Node *node);
+
+/** Jump target for abandoning the current statement after an error */
+static jmp_buf gen_jmp;
+
 /** Source file name for error messages */
 static const char *codegen_source;
 
 /**
- * @brief Prints a modern error for an AST node and exits
+ * @brief Prints a modern error for an AST node and abandons the statement
  * @param node Fault node, may be NULL (uses 1:1 then)
  * @param format printf-style message without the Error: prefix
+ * @details Counted via term_report; generation continues with the next
+ * statement so all diagnostics print, and the driver refuses to compile
+ * when any error was reported
  */
 static NORETURN void codegen_error(Node *node, const char *format, ...) {
   char message[256];
@@ -114,6 +201,7 @@ static NORETURN void codegen_error(Node *node, const char *format, ...) {
   int line = 1;
   int col = 1;
   int width = 1;
+  const char *source = codegen_source;
   if (node != NULL) {
     if (node->line > 0) {
       line = node->line;
@@ -124,9 +212,43 @@ static NORETURN void codegen_error(Node *node, const char *format, ...) {
     if (node->width > 0) {
       width = node->width;
     }
+    if (node->source != NULL) {
+      source = node->source;
+    }
   }
+  term_report(TERM_ERROR, source, line, col, width, message);
+  longjmp(gen_jmp, 1);
+}
+
+/**
+ * @brief Generates one statement, abandoning it (no code) on error
+ * @param node Statement node to generate
+ * @details Installs a fresh recovery buffer so codegen_error lands back
+ * here; the next statement installs its own, so no stale frame is reused
+ */
+static void try_gen_statement(Node *node) {
+  if (setjmp(gen_jmp) == 0) {
+    gen_statement(node);
+  }
+}
+
+/**
+ * @brief Reports a definition-collection error and continues
+ * @param node Fault node for location info
+ * @param format printf-style message without the Error: prefix
+ * @details Used before any statement recovery buffer is active, so it
+ * must not longjmp; generation is skipped later when errors exist
+ */
+static void collect_error(Node *node, const char *format, ...) {
+  char message[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  int line = node != NULL && node->line > 0 ? node->line : 1;
+  int col = node != NULL && node->col > 0 ? node->col : 1;
+  int width = node != NULL && node->width > 0 ? node->width : 1;
   term_report(TERM_ERROR, codegen_source, line, col, width, message);
-  exit(1);
 }
 
 /**
@@ -202,6 +324,7 @@ static int add_var(Node *node, const char *name, ValueType type, int is_param) {
   memcpy(var_names[var_count], name, len);
   var_names[var_count][len] = '\0';
   var_types[var_count] = type;
+  var_type_name[var_count] = NULL;
   var_is_param[var_count] = is_param;
   var_used[var_count] = 0;
   var_line[var_count] = node != NULL ? node->line : 1;
@@ -221,7 +344,7 @@ static int require_var(Node *node, const char *name) {
   if (slot < 0) {
     codegen_error(node, "Variable '%s' not declared", name);
   }
-  if (var_is_param[slot]) {
+  if (var_is_param[slot] && !no_param_warn) {
     codegen_warning(node, "Parameter '%s' should be accessed as self.%s", name,
                     name);
   }
@@ -242,6 +365,185 @@ static int require_param(Node *node, const char *member) {
   }
   var_used[slot] = 1;
   return slot;
+}
+
+/**
+ * @brief Finds a struct definition by name
+ * @param name Struct name to look up
+ * @return Struct index, or -1 if not found
+ */
+static int find_struct(const char *name) {
+  for (int i = 0; i < struct_count; i++) {
+    if (strcmp(struct_defs[i].name, name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Finds a class definition by name
+ * @param name Class name to look up
+ * @return Class index, or -1 if not found
+ */
+static int find_class(const char *name) {
+  for (int i = 0; i < class_count; i++) {
+    if (strcmp(class_defs[i].name, name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Finds a method inside a class
+ * @param class_idx Class index from find_class
+ * @param method Method name to look up
+ * @return Method index, or -1 if not found
+ */
+static int find_method(int class_idx, const char *method) {
+  if (class_idx < 0) {
+    return -1;
+  }
+  for (int i = 0; i < class_defs[class_idx].nmethods; i++) {
+    if (strcmp(class_defs[class_idx].methods[i].name, method) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Finds a field inside a struct
+ * @param struct_idx Struct index from find_struct
+ * @param field Field name to look up
+ * @return Field index, or -1 if not found
+ */
+static int find_struct_field(int struct_idx, const char *field) {
+  if (struct_idx < 0) {
+    return -1;
+  }
+  for (int i = 0; i < struct_defs[struct_idx].nfields; i++) {
+    if (strcmp(struct_defs[struct_idx].fields[i].name, field) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Finds a field inside a class
+ * @param class_idx Class index from find_class
+ * @param field Field name to look up
+ * @return Field index, or -1 if not found
+ */
+static int find_class_field(int class_idx, const char *field) {
+  if (class_idx < 0) {
+    return -1;
+  }
+  for (int i = 0; i < class_defs[class_idx].nfields; i++) {
+    if (strcmp(class_defs[class_idx].fields[i].name, field) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Returns the statically known instance type of an expression
+ * @param node Expression node
+ * @return Struct/class name for identifiers and new expressions, else NULL
+ */
+static const char *instance_type_of(Node *node) {
+  if (node == NULL) {
+    return NULL;
+  }
+  if (node->type == NODE_IDENTIFIER) {
+    int slot = find_var(node->identifier.name);
+    if (slot >= 0 &&
+        (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS)) {
+      return var_type_name[slot];
+    }
+    return NULL;
+  }
+  if (node->type == NODE_NEW) {
+    return node->new_expr.type_name;
+  }
+  return NULL;
+}
+
+/**
+ * @brief Resolves a declaration type keyword to a value category
+ * @param keyword Type keyword (num, bool, string, struct/class name)
+ * @param node Fault node for unknown types
+ * @param out_kind Receives struct/class name for instances, NULL otherwise
+ * @return Value category (unknown struct/class names are compile errors)
+ */
+static ValueType resolve_decl_type(const char *keyword, Node *node,
+                                   const char **out_kind) {
+  if (out_kind != NULL) {
+    *out_kind = NULL;
+  }
+  if (strcmp(keyword, "bool") == 0) {
+    return TYPE_BOOL;
+  }
+  if (strcmp(keyword, "string") == 0) {
+    return TYPE_STRING;
+  }
+  if (strcmp(keyword, "array") == 0) {
+    return TYPE_ARRAY;
+  }
+  if (strcmp(keyword, "num") == 0) {
+    return TYPE_INT;
+  }
+  int s = find_struct(keyword);
+  if (s >= 0) {
+    if (out_kind != NULL) {
+      *out_kind = struct_defs[s].name;
+    }
+    return TYPE_STRUCT;
+  }
+  int c = find_class(keyword);
+  if (c >= 0) {
+    if (out_kind != NULL) {
+      *out_kind = class_defs[c].name;
+    }
+    return TYPE_CLASS;
+  }
+  codegen_error(node, "Unknown type '%s'", keyword);
+}
+
+/**
+ * @brief Builds the assembly label for a class method
+ * @param class_name Class name
+ * @param method Method name
+ * @param buf Receives the mangled label (at least 128 bytes)
+ */
+static void method_label(const char *class_name, const char *method,
+                         char *buf) {
+  snprintf(buf, 128, "%s__%s", class_name, method);
+}
+
+/**
+ * @brief Emits a dynamically-aligned prologue for a C runtime call
+ * @details Saves the 0/8 byte misalignment above the shadow space so
+ * calls inside expressions (rsp 8 off) stay 16 byte aligned
+ */
+static void gen_runtime_prologue(void) {
+  fprintf(out, "  mov rax, rsp\n");
+  fprintf(out, "  and rax, 8\n");
+  fprintf(out, "  sub rsp, rax\n");
+  fprintf(out, "  sub rsp, 48\n");
+  fprintf(out, "  mov [rsp + 32], rax\n");
+}
+
+/**
+ * @brief Emits the epilogue matching gen_runtime_prologue (result in rax)
+ */
+static void gen_runtime_epilogue(void) {
+  fprintf(out, "  mov r10, [rsp + 32]\n");
+  fprintf(out, "  add rsp, 48\n");
+  fprintf(out, "  add rsp, r10\n");
 }
 
 /**
@@ -293,6 +595,10 @@ static const char *type_name(ValueType type) {
     return "string";
   case TYPE_ARRAY:
     return "array";
+  case TYPE_STRUCT:
+    return "struct";
+  case TYPE_CLASS:
+    return "class";
   default:
     return "num";
   }
@@ -374,17 +680,91 @@ static ValueType peek_type(Node *node) {
     }
     ValueType lt = peek_type(node->binary_op.left);
     ValueType rt = peek_type(node->binary_op.right);
+    if (strcmp(op, "+") == 0 && (lt == TYPE_STRING || rt == TYPE_STRING)) {
+      return TYPE_STRING;
+    }
     if (lt == TYPE_FLOAT || rt == TYPE_FLOAT) {
       return TYPE_FLOAT;
     }
     return TYPE_INT;
   }
   case NODE_MEMBER_ACCESS: {
-    int slot = find_var(node->member_access.member);
-    if (slot < 0 || !var_is_param[slot]) {
+    if (strcmp(node->member_access.object, "self") == 0) {
+      int slot = find_var(node->member_access.member);
+      if (slot >= 0 && var_is_param[slot]) {
+        return var_types[slot];
+      }
+      if (in_method && cur_class >= 0) {
+        int f = find_class_field(cur_class, node->member_access.member);
+        if (f >= 0) {
+          return class_defs[cur_class].fields[f].type;
+        }
+      }
       return TYPE_INT;
     }
-    return var_types[slot];
+    int slot = find_var(node->member_access.object);
+    if (slot < 0) {
+      return TYPE_INT;
+    }
+    if (var_types[slot] == TYPE_STRUCT) {
+      int s = find_struct(var_type_name[slot]);
+      int f = find_struct_field(s, node->member_access.member);
+      if (f >= 0) {
+        return struct_defs[s].fields[f].type;
+      }
+      return TYPE_INT;
+    }
+    if (var_types[slot] == TYPE_CLASS) {
+      int c = find_class(var_type_name[slot]);
+      int f = find_class_field(c, node->member_access.member);
+      if (f >= 0) {
+        return class_defs[c].fields[f].type;
+      }
+      return TYPE_INT;
+    }
+    return TYPE_INT;
+  }
+  case NODE_NEW: {
+    int s = find_struct(node->new_expr.type_name);
+    if (s >= 0) {
+      return TYPE_STRUCT;
+    }
+    int c = find_class(node->new_expr.type_name);
+    if (c >= 0) {
+      return TYPE_CLASS;
+    }
+    return TYPE_INT;
+  }
+  case NODE_INDEX:
+    return TYPE_INT;
+  case NODE_METHOD_CALL: {
+    int c = -1;
+    if (strcmp(node->method_call.object, "self") == 0) {
+      if (in_method) {
+        c = cur_class;
+      }
+    } else {
+      int slot = find_var(node->method_call.object);
+      if (slot >= 0 &&
+          (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS)) {
+        c = find_class(var_type_name[slot]);
+      }
+    }
+    if (c >= 0) {
+      int m = find_method(c, node->method_call.method);
+      if (m >= 0) {
+        const char *rt = class_defs[c].methods[m].ret_type;
+        if (strcmp(rt, "string") == 0) {
+          return TYPE_STRING;
+        }
+        if (strcmp(rt, "bool") == 0) {
+          return TYPE_BOOL;
+        }
+        /* num methods normalize results to doubles (see gen return). */
+        return TYPE_FLOAT;
+      }
+    }
+    return TYPE_INT;
   }
   default:
     return TYPE_INT;
@@ -436,14 +816,104 @@ static ValueType expr_type(Node *node) {
     }
     ValueType lt = peek_type(node->binary_op.left);
     ValueType rt = peek_type(node->binary_op.right);
+    if (strcmp(op, "+") == 0 && (lt == TYPE_STRING || rt == TYPE_STRING)) {
+      return TYPE_STRING;
+    }
     if (lt == TYPE_FLOAT || rt == TYPE_FLOAT) {
       return TYPE_FLOAT;
     }
     return TYPE_INT;
   }
   case NODE_MEMBER_ACCESS: {
-    int slot = require_param(node, node->member_access.member);
-    return var_types[slot];
+    if (strcmp(node->member_access.object, "self") == 0) {
+      int slot = find_var(node->member_access.member);
+      if (slot >= 0 && var_is_param[slot]) {
+        var_used[slot] = 1;
+        return var_types[slot];
+      }
+      if (in_method && cur_class >= 0) {
+        int f = find_class_field(cur_class, node->member_access.member);
+        if (f >= 0) {
+          int tslot = find_var("this ");
+          if (tslot >= 0) {
+            var_used[tslot] = 1;
+          }
+          return class_defs[cur_class].fields[f].type;
+        }
+        codegen_error(node, "'%s' is not a parameter or field of class '%s'",
+                      node->member_access.member, class_defs[cur_class].name);
+      }
+      slot = require_param(node, node->member_access.member);
+      return var_types[slot];
+    }
+    int slot = find_var(node->member_access.object);
+    if (slot < 0) {
+      codegen_error(node, "Variable '%s' not declared",
+                    node->member_access.object);
+    }
+    var_used[slot] = 1;
+    if (var_types[slot] == TYPE_STRUCT) {
+      int s = find_struct(var_type_name[slot]);
+      int f = find_struct_field(s, node->member_access.member);
+      if (f < 0) {
+        codegen_error(node, "Struct '%s' has no field '%s'",
+                      var_type_name[slot], node->member_access.member);
+      }
+      return struct_defs[s].fields[f].type;
+    }
+    if (var_types[slot] == TYPE_CLASS) {
+      int c = find_class(var_type_name[slot]);
+      int f = find_class_field(c, node->member_access.member);
+      if (f < 0) {
+        codegen_error(node, "Class '%s' has no field '%s'", var_type_name[slot],
+                      node->member_access.member);
+      }
+      return class_defs[c].fields[f].type;
+    }
+    codegen_error(node, "'%s' is not a struct or class instance",
+                  node->member_access.object);
+  }
+  case NODE_NEW: {
+    int s = find_struct(node->new_expr.type_name);
+    if (s >= 0) {
+      return TYPE_STRUCT;
+    }
+    int c = find_class(node->new_expr.type_name);
+    if (c >= 0) {
+      return TYPE_CLASS;
+    }
+    return TYPE_INT;
+  }
+  case NODE_INDEX:
+    return TYPE_INT;
+  case NODE_METHOD_CALL: {
+    int c = -1;
+    if (strcmp(node->method_call.object, "self") == 0) {
+      if (in_method) {
+        c = cur_class;
+      }
+    } else {
+      int slot = find_var(node->method_call.object);
+      if (slot >= 0 &&
+          (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS)) {
+        c = find_class(var_type_name[slot]);
+      }
+    }
+    if (c >= 0) {
+      int m = find_method(c, node->method_call.method);
+      if (m >= 0) {
+        const char *rt = class_defs[c].methods[m].ret_type;
+        if (strcmp(rt, "string") == 0) {
+          return TYPE_STRING;
+        }
+        if (strcmp(rt, "bool") == 0) {
+          return TYPE_BOOL;
+        }
+        /* num methods normalize results to doubles (see gen return). */
+        return TYPE_FLOAT;
+      }
+    }
+    return TYPE_INT;
   }
   default:
     return TYPE_INT;
@@ -488,6 +958,12 @@ static void scan_returns_bool_only(Node *node, int *found, int *all_bool) {
       break;
     case NODE_FOR:
       scan_returns_bool_only(s->for_stmt.body, found, all_bool);
+      break;
+    case NODE_CLASS_DEF:
+      scan_returns_bool_only(s->class_def.methods, found, all_bool);
+      break;
+    case NODE_METHOD_DEF:
+      scan_returns_bool_only(s->method_def.body, found, all_bool);
       break;
     default:
       break;
@@ -565,11 +1041,128 @@ static void scan_float_calls(Node *node) {
     case NODE_ARRAY_LITERAL:
       scan_float_calls(node->array_literal.elements);
       break;
+    case NODE_NEW:
+      scan_float_calls(node->new_expr.args);
+      break;
+    case NODE_INDEX:
+      scan_float_calls(node->index.base);
+      scan_float_calls(node->index.index);
+      break;
+    case NODE_METHOD_CALL:
+      scan_float_calls(node->method_call.args);
+      break;
+    case NODE_MEMBER_ASSIGN:
+      scan_float_calls(node->member_assign.value);
+      break;
+    case NODE_CLASS_DEF:
+      scan_float_calls(node->class_def.methods);
+      break;
+    case NODE_METHOD_DEF:
+      scan_float_calls(node->method_def.body);
+      break;
     default:
       break;
     }
   }
   scan_float_calls(node->right);
+}
+
+/**
+ * @brief Promotes method params receiving floats (matched by method name)
+ * @param node Node to visit (follows right sibling chain)
+ * @details Method calls resolve their class at codegen time, but float
+ * promotion is scanned beforehand, so promotion matches by method name
+ * across all classes. Boundary conversions keep this sound.
+ */
+static void scan_method_float_calls(Node *node) {
+  if (node == NULL) {
+    return;
+  }
+  if (node->type == NODE_METHOD_CALL) {
+    const char *method = node->method_call.method;
+    size_t mlen = strlen(method);
+    int idx = 0;
+    for (Node *a = node->method_call.args; a != NULL && idx < 32;
+         a = a->right, idx++) {
+      if (peek_type(a) == TYPE_FLOAT) {
+        for (int s = 0; s < sig_count; s++) {
+          size_t slen = strlen(sig_names[s]);
+          if (slen > mlen + 2 &&
+              strcmp(sig_names[s] + slen - mlen, method) == 0 &&
+              sig_names[s][slen - mlen - 2] == '_' &&
+              sig_names[s][slen - mlen - 1] == '_') {
+            sig_param_float[s][idx] = 1;
+          }
+        }
+      }
+    }
+    scan_method_float_calls(node->method_call.args);
+  } else {
+    switch (node->type) {
+    case NODE_VAR_DECL:
+      scan_method_float_calls(node->var_decl.value);
+      break;
+    case NODE_PRINT:
+      scan_method_float_calls(node->print_stmt.value);
+      break;
+    case NODE_RETURN:
+      scan_method_float_calls(node->return_stmt.value);
+      break;
+    case NODE_BINARY_OP:
+      scan_method_float_calls(node->binary_op.left);
+      scan_method_float_calls(node->binary_op.right);
+      break;
+    case NODE_IF:
+      scan_method_float_calls(node->if_stmt.condition);
+      scan_method_float_calls(node->if_stmt.body);
+      scan_method_float_calls(node->if_stmt.else_body);
+      break;
+    case NODE_WHILE:
+      scan_method_float_calls(node->while_stmt.condition);
+      scan_method_float_calls(node->while_stmt.body);
+      break;
+    case NODE_FOR:
+      scan_method_float_calls(node->for_stmt.body);
+      break;
+    case NODE_FUNCTION:
+      scan_method_float_calls(node->function.body);
+      break;
+    case NODE_ASSIGNMENT:
+      scan_method_float_calls(node->assignment.value);
+      break;
+    case NODE_ADD_ASSIGN:
+      scan_method_float_calls(node->add_assign.value);
+      break;
+    case NODE_SUB_ASSIGN:
+      scan_method_float_calls(node->sub_assign.value);
+      break;
+    case NODE_ARRAY_DECL:
+      scan_method_float_calls(node->array_decl.elements);
+      break;
+    case NODE_ARRAY_LITERAL:
+      scan_method_float_calls(node->array_literal.elements);
+      break;
+    case NODE_NEW:
+      scan_method_float_calls(node->new_expr.args);
+      break;
+    case NODE_INDEX:
+      scan_method_float_calls(node->index.base);
+      scan_method_float_calls(node->index.index);
+      break;
+    case NODE_MEMBER_ASSIGN:
+      scan_method_float_calls(node->member_assign.value);
+      break;
+    case NODE_CLASS_DEF:
+      scan_method_float_calls(node->class_def.methods);
+      break;
+    case NODE_METHOD_DEF:
+      scan_method_float_calls(node->method_def.body);
+      break;
+    default:
+      break;
+    }
+  }
+  scan_method_float_calls(node->right);
 }
 
 /**
@@ -584,7 +1177,9 @@ static int add_string(const char *value) {
     }
   }
   if (string_count >= 1024) {
-    codegen_error(NULL, "Too many string literals");
+    term_report(TERM_ERROR, codegen_source, 1, 1, 1,
+                "Too many string literals");
+    return 0;
   }
   size_t len = strlen(value);
   string_table[string_count] = malloc(len + 1);
@@ -712,11 +1307,36 @@ static void collect_strings(Node *node) {
   case NODE_ASSIGNMENT:
     collect_strings(node->assignment.value);
     break;
+  case NODE_ADD_ASSIGN:
+    collect_strings(node->add_assign.value);
+    break;
+  case NODE_SUB_ASSIGN:
+    collect_strings(node->sub_assign.value);
+    break;
   case NODE_ARRAY_DECL:
     collect_strings(node->array_decl.elements);
     break;
   case NODE_ARRAY_LITERAL:
     collect_strings(node->array_literal.elements);
+    break;
+  case NODE_NEW:
+    collect_strings(node->new_expr.args);
+    break;
+  case NODE_INDEX:
+    collect_strings(node->index.base);
+    collect_strings(node->index.index);
+    break;
+  case NODE_METHOD_CALL:
+    collect_strings(node->method_call.args);
+    break;
+  case NODE_MEMBER_ASSIGN:
+    collect_strings(node->member_assign.value);
+    break;
+  case NODE_CLASS_DEF:
+    collect_strings(node->class_def.methods);
+    break;
+  case NODE_METHOD_DEF:
+    collect_strings(node->method_def.body);
     break;
   default:
     break;
@@ -800,6 +1420,9 @@ static void gen_data_section() {
   fprintf(out, "  fmt_overflow db \"integer overflow\", 10, 0\n");
   fprintf(out, "  fmt_divzero db \"division by zero\", 10, 0\n");
   fprintf(out, "  fmt_stack db \"stack overflow\", 10, 0\n");
+  fprintf(out, "  fmt_index db \"index out of bounds\", 10, 0\n");
+  fprintf(out, "  fmt_alloc db \"out of memory\", 10, 0\n");
+  fprintf(out, "  fmt_null db \"null instance access\", 10, 0\n");
   fprintf(out, "  stack_floor dq 0\n");
   for (int i = 0; i < string_count; i++) {
     fprintf(out, "  str%d db ", i);
@@ -856,10 +1479,37 @@ static const char *func_label(const char *name) {
 
 /**
  * @brief Generates a stdin integer read, result left in rax
+ * @param node Call node (0 args, or 1 string prompt like Python)
  * @details Aligns the stack dynamically since calls inside expressions
- * may run with rsp 8 off 16 byte alignment.
+ * may run with rsp 8 off 16 byte alignment. A prompt is printed with
+ * no trailing newline and stdout is flushed before blocking on scanf.
  */
-static void gen_input() {
+static void gen_input(Node *node) {
+  Node *prompt = node->func_call.args;
+  int arg_count = 0;
+  for (Node *a = prompt; a != NULL; a = a->right) {
+    arg_count++;
+  }
+  if (arg_count > 1) {
+    codegen_error(node, "input takes at most 1 argument");
+  }
+  if (prompt != NULL) {
+    ValueType pt = expr_type(prompt);
+    if (pt != TYPE_STRING) {
+      codegen_error(prompt, "input prompt must be a string, got %s",
+                    type_name(pt));
+    }
+    gen_expression(prompt);
+    fprintf(out, "  mov rdx, rax\n");
+    fprintf(out, "  lea rcx, [rel fmt_str]\n");
+    gen_runtime_prologue();
+    fprintf(out, "  call printf\n");
+    gen_runtime_epilogue();
+    fprintf(out, "  xor ecx, ecx\n");
+    gen_runtime_prologue();
+    fprintf(out, "  call fflush\n");
+    gen_runtime_epilogue();
+  }
   fprintf(out, "  mov rax, rsp\n");
   fprintf(out, "  and rax, 8\n");
   fprintf(out, "  sub rsp, rax\n");
@@ -878,6 +1528,30 @@ static void gen_input() {
 }
 
 /**
+ * @brief Generates a string length read, result left in rax
+ * @param node Call node (exactly 1 string argument)
+ */
+static void gen_len(Node *node) {
+  Node *arg = node->func_call.args;
+  int arg_count = 0;
+  for (Node *a = arg; a != NULL; a = a->right) {
+    arg_count++;
+  }
+  if (arg_count != 1) {
+    codegen_error(node, "len takes exactly 1 argument");
+  }
+  ValueType given = expr_type(arg);
+  if (given != TYPE_STRING) {
+    codegen_error(arg, "len expects a string, got %s", type_name(given));
+  }
+  gen_expression(arg);
+  fprintf(out, "  mov rcx, rax\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call strlen\n");
+  gen_runtime_epilogue();
+}
+
+/**
  * @brief Generates code for a function call, result left in rax
  * @param node Call node to generate
  * @details First four arguments use rcx, rdx, r8, r9. The rest spill
@@ -890,10 +1564,11 @@ static void gen_call(Node *node) {
     arg_count++;
   }
   if (strcmp(node->func_call.name, "input") == 0) {
-    if (arg_count != 0) {
-      codegen_error(node, "input takes no arguments");
-    }
-    gen_input();
+    gen_input(node);
+    return;
+  }
+  if (strcmp(node->func_call.name, "len") == 0) {
+    gen_len(node);
     return;
   }
   for (int s = 0; s < sig_count; s++) {
@@ -901,14 +1576,12 @@ static void gen_call(Node *node) {
       Node *a = node->func_call.args;
       Node *p = sig_params[s];
       while (a != NULL && p != NULL) {
-        ValueType given = expr_type(a);
-        ValueType want = p->type == NODE_VAR_DECL
-                             ? type_keyword(p->var_decl.var_type)
-                             : TYPE_INT;
-        if (!types_compatible(want, given)) {
-          codegen_error(a, "Cannot pass %s to %s parameter", type_name(given),
-                        type_name(want));
+        const char *want_kind = NULL;
+        ValueType want = TYPE_INT;
+        if (p->type == NODE_VAR_DECL) {
+          want = resolve_decl_type(p->var_decl.var_type, p, &want_kind);
         }
+        check_call_arg(a, want, want_kind);
         a = a->right;
         p = p->right;
       }
@@ -970,6 +1643,283 @@ static void gen_call(Node *node) {
 }
 
 /**
+ * @brief Concatenates two strings, result left in rax
+ * @details IN: rax holds left pointer, rbx holds right pointer, rsp aligned.
+ * Allocates len1+len2+1 bytes and copies both parts including the NUL.
+ */
+static void gen_string_concat(void) {
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  test rbx, rbx\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  sub rsp, 64\n");
+  fprintf(out, "  mov [rsp + 0], rax\n");
+  fprintf(out, "  mov [rsp + 8], rbx\n");
+  fprintf(out, "  mov rcx, [rsp + 0]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call strlen\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov [rsp + 16], rax\n");
+  fprintf(out, "  mov rcx, [rsp + 8]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call strlen\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov [rsp + 24], rax\n");
+  fprintf(out, "  mov rax, [rsp + 16]\n");
+  fprintf(out, "  add rax, [rsp + 24]\n");
+  fprintf(out, "  jo overflow_trap\n");
+  fprintf(out, "  add rax, 1\n");
+  fprintf(out, "  jo overflow_trap\n");
+  fprintf(out, "  mov rcx, rax\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call malloc\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz alloc_trap\n");
+  fprintf(out, "  mov [rsp + 32], rax\n");
+  fprintf(out, "  mov rcx, [rsp + 32]\n");
+  fprintf(out, "  mov rdx, [rsp + 0]\n");
+  fprintf(out, "  mov r8, [rsp + 16]\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call memcpy\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov rax, [rsp + 32]\n");
+  fprintf(out, "  add rax, [rsp + 16]\n");
+  fprintf(out, "  mov rcx, rax\n");
+  fprintf(out, "  mov rdx, [rsp + 8]\n");
+  fprintf(out, "  mov r8, [rsp + 24]\n");
+  fprintf(out, "  add r8, 1\n");
+  gen_runtime_prologue();
+  fprintf(out, "  call memcpy\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  mov rax, [rsp + 32]\n");
+  fprintf(out, "  add rsp, 64\n");
+}
+
+/**
+ * @brief Checks one call argument against its parameter type
+ * @param arg Argument expression node
+ * @param want Declared parameter category
+ * @param want_kind Struct/class name when want is an instance, else NULL
+ */
+static void check_call_arg(Node *arg, ValueType want, const char *want_kind) {
+  ValueType given = expr_type(arg);
+  if (want == TYPE_STRUCT || want == TYPE_CLASS) {
+    if (given == want) {
+      const char *given_kind = instance_type_of(arg);
+      if (given_kind != NULL && want_kind != NULL &&
+          strcmp(given_kind, want_kind) != 0) {
+        codegen_error(arg, "Cannot pass %s to %s parameter", given_kind,
+                      want_kind);
+      }
+    } else if (given == TYPE_INT && arg->type == NODE_FUNC_CALL) {
+      /* Optimistic: assume the call returns a matching instance. */
+    } else {
+      codegen_error(arg, "Cannot pass %s to %s parameter", type_name(given),
+                    want_kind);
+    }
+  } else if (!types_compatible(want, given)) {
+    codegen_error(arg, "Cannot pass %s to %s parameter", type_name(given),
+                  type_name(want));
+  }
+}
+
+/**
+ * @brief Generates code for a method call, result left in rax
+ * @param node METHOD_CALL node to generate
+ * @details The instance pointer travels as hidden first argument (rcx)
+ */
+static void gen_method_call(Node *node) {
+  const char *object = node->method_call.object;
+  const char *method = node->method_call.method;
+  int cls = -1;
+  int self_this = 0;
+  int obj_slot = -1;
+  if (strcmp(object, "self") == 0) {
+    if (!in_method) {
+      codegen_error(node, "Only self.member access is supported");
+    }
+    cls = cur_class;
+    self_this = 1;
+  } else {
+    if (find_struct(object) >= 0 || find_class(object) >= 0) {
+      codegen_error(node, "Cannot call method on type '%s', use an instance",
+                    object);
+    }
+    obj_slot = find_var(object);
+    if (obj_slot < 0) {
+      codegen_error(node, "Variable '%s' not declared", object);
+    }
+    if (var_types[obj_slot] == TYPE_STRUCT) {
+      codegen_error(node, "Struct '%s' has no methods",
+                    var_type_name[obj_slot]);
+    }
+    if (var_types[obj_slot] != TYPE_CLASS) {
+      codegen_error(node, "'%s' is not a class instance", object);
+    }
+    var_used[obj_slot] = 1;
+    cls = find_class(var_type_name[obj_slot]);
+  }
+  int m = find_method(cls, method);
+  if (m < 0) {
+    codegen_error(node, "Class '%s' has no method '%s'", class_defs[cls].name,
+                  method);
+  }
+  MethodDef *md = &class_defs[cls].methods[m];
+  char label[128];
+  method_label(class_defs[cls].name, method, label);
+  int sig_idx = -1;
+  for (int s = 0; s < sig_count; s++) {
+    if (strcmp(sig_names[s], label) == 0) {
+      sig_idx = s;
+      break;
+    }
+  }
+  int want_n = 0;
+  for (Node *p = md->params; p != NULL; p = p->right) {
+    want_n++;
+  }
+  int got_n = 0;
+  for (Node *a = node->method_call.args; a != NULL; a = a->right) {
+    got_n++;
+  }
+  if (want_n != got_n) {
+    codegen_error(node, "Expected %d arguments for method '%s', got %d", want_n,
+                  method, got_n);
+  }
+  ValueType wants[32];
+  Node *p = md->params;
+  Node *a = node->method_call.args;
+  int i = 0;
+  for (; p != NULL && a != NULL; p = p->right, a = a->right, i++) {
+    const char *kind = NULL;
+    ValueType want = TYPE_INT;
+    if (p->type == NODE_VAR_DECL) {
+      want = resolve_decl_type(p->var_decl.var_type, p, &kind);
+      if (want == TYPE_INT && sig_idx >= 0 && i < 32 &&
+          sig_param_float[sig_idx][i]) {
+        want = TYPE_FLOAT;
+      }
+    } else {
+      if (sig_idx >= 0 && i < 32 && sig_param_float[sig_idx][i]) {
+        want = TYPE_FLOAT;
+      }
+    }
+    wants[i] = want;
+    check_call_arg(a, want, kind);
+  }
+  const char *regs[4] = {"rcx", "rdx", "r8", "r9"};
+  int total = 1 + got_n;
+  int frame = 64 + 8 * (total > 4 ? total - 4 : 0);
+  if (frame % 16 != 0) {
+    frame += 8;
+  }
+  fprintf(out, "  sub rsp, %d\n", frame);
+  if (self_this) {
+    int tslot = find_var("this ");
+    fprintf(out, "  mov rax, [rbp - %d]\n", (tslot + 1) * 8);
+  } else {
+    fprintf(out, "  mov rax, [rbp - %d]\n", (obj_slot + 1) * 8);
+  }
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz null_trap\n");
+  fprintf(out, "  mov [rsp + %d], rax\n", frame - 32);
+  i = 1;
+  for (a = node->method_call.args; a != NULL; a = a->right, i++) {
+    ValueType given = peek_type(a);
+    ValueType want = wants[i - 1];
+    gen_expression(a);
+    if ((want == TYPE_INT || want == TYPE_BOOL) && given == TYPE_FLOAT) {
+      fprintf(out, "  movq xmm0, rax\n");
+      fprintf(out, "  cvttsd2si rax, xmm0\n");
+    } else if (want == TYPE_FLOAT &&
+               (given == TYPE_INT || given == TYPE_BOOL)) {
+      fprintf(out, "  cvtsi2sd xmm0, rax\n");
+      fprintf(out, "  movq rax, xmm0\n");
+    }
+    if (i < 4) {
+      fprintf(out, "  mov [rsp + %d], rax\n", frame - 32 + 8 * i);
+    } else {
+      fprintf(out, "  mov [rsp + %d], rax\n", 32 + 8 * (i - 4));
+    }
+  }
+  for (i = 0; i < total && i < 4; i++) {
+    fprintf(out, "  mov %s, [rsp + %d]\n", regs[i], frame - 32 + 8 * i);
+  }
+  fprintf(out, "  call %s\n", label);
+  fprintf(out, "  add rsp, %d\n", frame);
+}
+
+/**
+ * @brief Generates code for a 'new Type(args)' instantiation, ptr in rax
+ * @param node NEW node to generate
+ */
+static void gen_new(Node *node) {
+  const char *type = node->new_expr.type_name;
+  int s = find_struct(type);
+  int c = find_class(type);
+  if (s < 0 && c < 0) {
+    if (strcmp(type, "num") == 0 || strcmp(type, "bool") == 0 ||
+        strcmp(type, "string") == 0 || strcmp(type, "array") == 0) {
+      codegen_error(node, "Only structs and classes can be created with 'new'");
+    }
+    codegen_error(node, "Unknown struct or class '%s'", type);
+  }
+  int nfields = (s >= 0) ? struct_defs[s].nfields : class_defs[c].nfields;
+  FieldDef *fields = (s >= 0) ? struct_defs[s].fields : class_defs[c].fields;
+  const char *kind = (s >= 0) ? struct_defs[s].name : class_defs[c].name;
+  int nargs = 0;
+  for (Node *a = node->new_expr.args; a != NULL; a = a->right) {
+    nargs++;
+  }
+  if (nargs != nfields) {
+    codegen_error(node, "Expected %d arguments for '%s', got %d", nfields, kind,
+                  nargs);
+  }
+  ValueType given_types[MAX_FIELDS];
+  int i = 0;
+  for (Node *a = node->new_expr.args; a != NULL; a = a->right, i++) {
+    ValueType given = expr_type(a);
+    given_types[i] = given;
+    ValueType want = fields[i].type;
+    if (want == TYPE_STRING) {
+      if (given != TYPE_STRING) {
+        codegen_error(a, "Cannot assign %s to string field '%s'",
+                      type_name(given), fields[i].name);
+      }
+    } else if (!is_numeric(given)) {
+      codegen_error(a, "Cannot assign %s to num field '%s'", type_name(given),
+                    fields[i].name);
+    }
+  }
+  for (Node *a = node->new_expr.args; a != NULL; a = a->right) {
+    gen_expression(a);
+    fprintf(out, "  push rax\n");
+  }
+  long long size = nfields == 0 ? 8 : (long long)nfields * 8;
+  fprintf(out, "  mov rcx, %lld\n", size);
+  gen_runtime_prologue();
+  fprintf(out, "  call malloc\n");
+  gen_runtime_epilogue();
+  fprintf(out, "  test rax, rax\n");
+  fprintf(out, "  jz alloc_trap\n");
+  fprintf(out, "  mov r11, rax\n");
+  for (i = nfields - 1; i >= 0; i--) {
+    fprintf(out, "  pop rdx\n");
+    if (fields[i].type == TYPE_FLOAT &&
+        (given_types[i] == TYPE_INT || given_types[i] == TYPE_BOOL)) {
+      fprintf(out, "  cvtsi2sd xmm0, rdx\n");
+      fprintf(out, "  movq rdx, xmm0\n");
+    } else if (fields[i].type == TYPE_BOOL && given_types[i] == TYPE_FLOAT) {
+      fprintf(out, "  movq xmm0, rdx\n");
+      fprintf(out, "  cvttsd2si rdx, xmm0\n");
+    }
+    fprintf(out, "  mov [r11 + %d], rdx\n", i * 8);
+  }
+  fprintf(out, "  mov rax, r11\n");
+}
+
+/**
  * @brief Generates code for an expression, result left in rax
  * @param node Expression node to generate
  */
@@ -994,11 +1944,69 @@ static void gen_expression(Node *node) {
     break;
   }
   case NODE_MEMBER_ACCESS: {
-    if (strcmp(node->member_access.object, "self") != 0) {
-      codegen_error(node, "Only self.member access is supported");
+    const char *object = node->member_access.object;
+    const char *member = node->member_access.member;
+    if (strcmp(object, "self") == 0) {
+      int pslot = find_var(member);
+      if (pslot >= 0 && var_is_param[pslot]) {
+        var_used[pslot] = 1;
+        fprintf(out, "  mov rax, [rbp - %d]\n", (pslot + 1) * 8);
+        break;
+      }
+      if (in_method && cur_class >= 0) {
+        int f = find_class_field(cur_class, member);
+        if (f >= 0) {
+          int tslot = find_var("this ");
+          var_used[tslot] = 1;
+          fprintf(out, "  mov rax, [rbp - %d]\n", (tslot + 1) * 8);
+          fprintf(out, "  test rax, rax\n");
+          fprintf(out, "  jz null_trap\n");
+          fprintf(out, "  mov rax, [rax + %d]\n", f * 8);
+          break;
+        }
+        codegen_error(node, "'%s' is not a parameter or field of class '%s'",
+                      member, class_defs[cur_class].name);
+      }
+      int slot = require_param(node, member);
+      fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+      break;
     }
-    int slot = require_param(node, node->member_access.member);
-    fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+    if (find_struct(object) >= 0 || find_class(object) >= 0) {
+      codegen_error(node, "Cannot use type '%s' as a value, use an instance",
+                    object);
+    }
+    int slot = find_var(object);
+    if (slot < 0) {
+      codegen_error(node, "Variable '%s' not declared", object);
+    }
+    var_used[slot] = 1;
+    if (var_types[slot] == TYPE_STRUCT) {
+      int s = find_struct(var_type_name[slot]);
+      int f = find_struct_field(s, member);
+      if (f < 0) {
+        codegen_error(node, "Struct '%s' has no field '%s'",
+                      var_type_name[slot], member);
+      }
+      fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+      fprintf(out, "  test rax, rax\n");
+      fprintf(out, "  jz null_trap\n");
+      fprintf(out, "  mov rax, [rax + %d]\n", f * 8);
+      break;
+    }
+    if (var_types[slot] == TYPE_CLASS) {
+      int c = find_class(var_type_name[slot]);
+      int f = find_class_field(c, member);
+      if (f < 0) {
+        codegen_error(node, "Class '%s' has no field '%s'", var_type_name[slot],
+                      member);
+      }
+      fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+      fprintf(out, "  test rax, rax\n");
+      fprintf(out, "  jz null_trap\n");
+      fprintf(out, "  mov rax, [rax + %d]\n", f * 8);
+      break;
+    }
+    codegen_error(node, "'%s' is not a struct or class instance", object);
     break;
   }
   case NODE_STRING_LITERAL: {
@@ -1009,6 +2017,61 @@ static void gen_expression(Node *node) {
   case NODE_FUNC_CALL:
     gen_call(node);
     break;
+  case NODE_NEW: {
+    gen_new(node);
+    break;
+  }
+  case NODE_INDEX: {
+    ValueType base_type = peek_type(node->index.base);
+    if (base_type == TYPE_STRING) {
+      ValueType checked = expr_type(node->index.base);
+      (void)checked;
+    } else {
+      ValueType checked = expr_type(node->index.base);
+      if (checked != TYPE_STRING) {
+        codegen_error(node->index.base, "Only strings can be indexed, got %s",
+                      type_name(checked));
+      }
+    }
+    ValueType index_type = peek_type(node->index.index);
+    if (!is_numeric(index_type)) {
+      ValueType checked = expr_type(node->index.index);
+      codegen_error(node->index.index, "String index must be a number, got %s",
+                    type_name(checked));
+    }
+    gen_expression(node->index.base);
+    fprintf(out, "  push rax\n");
+    gen_expression(node->index.index);
+    if (index_type == TYPE_FLOAT) {
+      fprintf(out, "  movq xmm0, rax\n");
+      fprintf(out, "  cvttsd2si rax, xmm0\n");
+    } else if (index_type == TYPE_BOOL) {
+      fprintf(out, "  movzx rax, al\n");
+    }
+    fprintf(out, "  mov rbx, rax\n");
+    fprintf(out, "  pop rax\n");
+    fprintf(out, "  test rax, rax\n");
+    fprintf(out, "  jz null_trap\n");
+    fprintf(out, "  cmp rbx, 0\n");
+    fprintf(out, "  jl index_trap\n");
+    fprintf(out, "  sub rsp, 64\n");
+    fprintf(out, "  mov [rsp + 0], rax\n");
+    fprintf(out, "  mov [rsp + 8], rbx\n");
+    fprintf(out, "  mov rcx, [rsp + 0]\n");
+    gen_runtime_prologue();
+    fprintf(out, "  call strlen\n");
+    gen_runtime_epilogue();
+    fprintf(out, "  cmp [rsp + 8], rax\n");
+    fprintf(out, "  jae index_trap\n");
+    fprintf(out, "  mov rax, [rsp + 0]\n");
+    fprintf(out, "  add rax, [rsp + 8]\n");
+    fprintf(out, "  movzx eax, byte [rax]\n");
+    fprintf(out, "  add rsp, 64\n");
+    break;
+  }
+  case NODE_METHOD_CALL:
+    gen_method_call(node);
+    break;
   case NODE_ARRAY_LITERAL:
     codegen_error(node, "Array literal not supported in codegen expression");
     break;
@@ -1016,6 +2079,60 @@ static void gen_expression(Node *node) {
     const char *op = node->binary_op.op;
     ValueType left_type = peek_type(node->binary_op.left);
     ValueType right_type = peek_type(node->binary_op.right);
+    int left_is_str = (left_type == TYPE_STRING);
+    int right_is_str = (right_type == TYPE_STRING);
+    if (left_is_str || right_is_str) {
+      if (strcmp(op, "+") == 0) {
+        if (!left_is_str || !right_is_str) {
+          ValueType bad = left_is_str ? right_type : left_type;
+          codegen_error(node, "Cannot concatenate string with %s",
+                        type_name(bad));
+        }
+        gen_expression(node->binary_op.left);
+        fprintf(out, "  push rax\n");
+        gen_expression(node->binary_op.right);
+        fprintf(out, "  mov rbx, rax\n");
+        fprintf(out, "  pop rax\n");
+        gen_string_concat();
+        break;
+      }
+      if (is_comparison_op(op)) {
+        if (!left_is_str || !right_is_str) {
+          ValueType bad = left_is_str ? right_type : left_type;
+          codegen_error(node, "Operator '%s' cannot compare string with %s", op,
+                        type_name(bad));
+        }
+        gen_expression(node->binary_op.left);
+        fprintf(out, "  push rax\n");
+        gen_expression(node->binary_op.right);
+        fprintf(out, "  mov rbx, rax\n");
+        fprintf(out, "  pop rax\n");
+        fprintf(out, "  mov rcx, rax\n");
+        fprintf(out, "  mov rdx, rbx\n");
+        gen_runtime_prologue();
+        fprintf(out, "  call strcmp\n");
+        gen_runtime_epilogue();
+        fprintf(out, "  test eax, eax\n");
+        if (strcmp(op, "==") == 0) {
+          fprintf(out, "  sete al\n");
+        } else if (strcmp(op, "!=") == 0) {
+          fprintf(out, "  setne al\n");
+        } else if (strcmp(op, "<") == 0) {
+          fprintf(out, "  setl al\n");
+        } else if (strcmp(op, ">") == 0) {
+          fprintf(out, "  setg al\n");
+        } else if (strcmp(op, "<=") == 0) {
+          fprintf(out, "  setle al\n");
+        } else {
+          fprintf(out, "  setge al\n");
+        }
+        fprintf(out, "  movzx rax, al\n");
+        break;
+      }
+      ValueType bad = left_is_str ? left_type : right_type;
+      codegen_error(node, "Operator '%s' cannot be applied to %s", op,
+                    type_name(bad));
+    }
     if (!is_numeric(left_type) || !is_numeric(right_type)) {
       ValueType bad = !is_numeric(left_type) ? left_type : right_type;
       codegen_error(node, "Operator '%s' cannot be applied to %s", op,
@@ -1271,26 +2388,101 @@ static void gen_print_string(Node *strnode, const char *value) {
           memcpy(name, value + i + 1, name_len);
           name[name_len] = '\0';
           char *dot = strchr(name, '.');
-          int slot;
+          ValueType ptype = TYPE_INT;
+          int pslot = -1;
+          int field_off = -1;
           if (dot == NULL) {
-            slot = require_var(strnode, name);
+            pslot = require_var(strnode, name);
+            if (var_types[pslot] == TYPE_STRUCT ||
+                var_types[pslot] == TYPE_CLASS) {
+              codegen_error(strnode, "Cannot print %s '%s' directly",
+                            var_type_name[pslot], name);
+            }
+            ptype = var_types[pslot];
           } else {
             *dot = '\0';
-            if (strcmp(name, "self") != 0) {
-              codegen_error(strnode, "Only self.member access is supported");
+            const char *obj = name;
+            const char *memb = dot + 1;
+            if (strcmp(obj, "self") == 0) {
+              int q = find_var(memb);
+              if (q >= 0 && var_is_param[q]) {
+                var_used[q] = 1;
+                pslot = q;
+                ptype = var_types[q];
+              } else if (in_method && cur_class >= 0 &&
+                         find_class_field(cur_class, memb) >= 0) {
+                int f = find_class_field(cur_class, memb);
+                int tslot = find_var("this ");
+                var_used[tslot] = 1;
+                pslot = tslot;
+                field_off = f * 8;
+                ptype = class_defs[cur_class].fields[f].type;
+              } else if (in_method && cur_class >= 0) {
+                codegen_error(strnode,
+                              "'%s' is not a parameter or field of class '%s'",
+                              memb, class_defs[cur_class].name);
+              } else {
+                pslot = require_param(strnode, memb);
+                ptype = var_types[pslot];
+              }
+            } else {
+              if (find_struct(obj) >= 0 || find_class(obj) >= 0) {
+                codegen_error(
+                    strnode, "Cannot use type '%s' as a value, use an instance",
+                    obj);
+              }
+              int q = find_var(obj);
+              if (q < 0) {
+                codegen_error(strnode, "Variable '%s' not declared", obj);
+              }
+              var_used[q] = 1;
+              if (var_types[q] == TYPE_STRUCT) {
+                int s = find_struct(var_type_name[q]);
+                int f = find_struct_field(s, memb);
+                if (f < 0) {
+                  codegen_error(strnode, "Struct '%s' has no field '%s'",
+                                var_type_name[q], memb);
+                }
+                pslot = q;
+                field_off = f * 8;
+                ptype = struct_defs[s].fields[f].type;
+              } else if (var_types[q] == TYPE_CLASS) {
+                int c = find_class(var_type_name[q]);
+                int f = find_class_field(c, memb);
+                if (f < 0) {
+                  codegen_error(strnode, "Class '%s' has no field '%s'",
+                                var_type_name[q], memb);
+                }
+                pslot = q;
+                field_off = f * 8;
+                ptype = class_defs[c].fields[f].type;
+              } else {
+                codegen_error(strnode, "'%s' is not a struct or class instance",
+                              obj);
+              }
             }
-            slot = require_param(strnode, dot + 1);
           }
           free(name);
-          if (var_types[slot] == TYPE_STRING) {
+          if (field_off >= 0) {
+            fprintf(out, "  mov rax, [rbp - %d]\n", (pslot + 1) * 8);
+            fprintf(out, "  test rax, rax\n");
+            fprintf(out, "  jz null_trap\n");
+            fprintf(out, "  mov rdx, [rax + %d]\n", field_off);
+            if (ptype == TYPE_FLOAT) {
+              fprintf(out, "  movq xmm0, rdx\n");
+            }
+          } else if (ptype == TYPE_FLOAT) {
+            fprintf(out, "  movsd xmm0, [rbp - %d]\n", (pslot + 1) * 8);
+            fprintf(out, "  movq rdx, xmm0\n");
+          } else {
+            fprintf(out, "  mov rdx, [rbp - %d]\n", (pslot + 1) * 8);
+          }
+          if (ptype == TYPE_STRING) {
             fprintf(out, "  lea rcx, [rel fmt_str]\n");
-            fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
             fprintf(out, "  sub rsp, 32\n");
             fprintf(out, "  call printf\n");
             fprintf(out, "  add rsp, 32\n");
-          } else if (var_types[slot] == TYPE_FLOAT) {
-            fprintf(out, "  movsd xmm0, [rbp - %d]\n", (slot + 1) * 8);
-            fprintf(out, "  movq rdx, xmm0\n");
+          } else if (ptype == TYPE_FLOAT) {
             fprintf(out, "  lea rcx, [rel fmt_float_raw]\n");
             fprintf(out, "  movapd xmm1, xmm0\n");
             fprintf(out, "  sub rsp, 32\n");
@@ -1298,7 +2490,6 @@ static void gen_print_string(Node *strnode, const char *value) {
             fprintf(out, "  add rsp, 32\n");
           } else {
             fprintf(out, "  lea rcx, [rel fmt_int_raw]\n");
-            fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
             fprintf(out, "  sub rsp, 32\n");
             fprintf(out, "  call printf\n");
             fprintf(out, "  add rsp, 32\n");
@@ -1334,7 +2525,7 @@ static void gen_block(Node *list) {
   int saved = var_count;
   int saved_arrays = array_count;
   for (Node *s = list; s != NULL; s = s->right) {
-    gen_statement(s);
+    try_gen_statement(s);
   }
   check_unused_vars(saved);
   var_count = saved;
@@ -1360,24 +2551,85 @@ static void gen_statement(Node *node) {
     if (existing >= 0) {
       codegen_warning(node, "Shadows parameter '%s'", node->var_decl.name);
     }
-    ValueType declared = type_keyword(node->var_decl.var_type);
+    const char *declared_kind = NULL;
+    ValueType declared =
+        resolve_decl_type(node->var_decl.var_type, node, &declared_kind);
     ValueType given = TYPE_INT;
     int has_value = (node->var_decl.value != NULL);
     if (has_value) {
       given = expr_type(node->var_decl.value);
-      if (!types_compatible(declared, given)) {
+      if (declared == TYPE_STRUCT || declared == TYPE_CLASS) {
+        if (node->var_decl.value->type == NODE_NEW) {
+          if (strcmp(node->var_decl.value->new_expr.type_name, declared_kind) !=
+              0) {
+            codegen_error(node->var_decl.value, "Cannot assign %s to %s '%s'",
+                          node->var_decl.value->new_expr.type_name,
+                          declared_kind, node->var_decl.name);
+          }
+          given = declared;
+        } else if (given == declared) {
+          const char *given_kind = instance_type_of(node->var_decl.value);
+          if (given_kind != NULL && strcmp(given_kind, declared_kind) != 0) {
+            codegen_error(node->var_decl.value, "Cannot assign %s to %s '%s'",
+                          given_kind, declared_kind, node->var_decl.name);
+          }
+        } else if (given == TYPE_INT &&
+                   node->var_decl.value->type == NODE_FUNC_CALL) {
+          given = declared;
+        } else {
+          codegen_error(node->var_decl.value, "Cannot assign %s to %s '%s'",
+                        type_name(given), declared_kind, node->var_decl.name);
+        }
+      } else if (!types_compatible(declared, given)) {
         codegen_error(node->var_decl.value, "Cannot assign %s to %s '%s'",
                       type_name(given), type_name(declared),
                       node->var_decl.name);
       }
     }
     int slot = add_var(node, node->var_decl.name, declared, 0);
+    if (declared_kind != NULL) {
+      size_t kn = strlen(declared_kind);
+      var_type_name[slot] = malloc(kn + 1);
+      memcpy(var_type_name[slot], declared_kind, kn);
+      var_type_name[slot][kn] = '\0';
+    }
     /* num holding a float becomes a float slot (monotonic promotion). */
     if (has_value && declared == TYPE_INT && given == TYPE_FLOAT) {
       var_types[slot] = TYPE_FLOAT;
     }
     if (has_value) {
-      if (var_types[slot] == TYPE_FLOAT && given == TYPE_INT) {
+      if (declared == TYPE_STRUCT || declared == TYPE_CLASS) {
+        if (node->var_decl.value->type == NODE_NEW ||
+            node->var_decl.value->type == NODE_FUNC_CALL) {
+          gen_expression(node->var_decl.value);
+          fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+        } else if (node->var_decl.value->type == NODE_IDENTIFIER) {
+          int nfields = 0;
+          if (declared == TYPE_STRUCT) {
+            nfields = struct_defs[find_struct(declared_kind)].nfields;
+          } else {
+            nfields = class_defs[find_class(declared_kind)].nfields;
+          }
+          long long size = nfields == 0 ? 8 : (long long)nfields * 8;
+          int src = find_var(node->var_decl.value->identifier.name);
+          fprintf(out, "  mov rcx, %lld\n", size);
+          gen_runtime_prologue();
+          fprintf(out, "  call malloc\n");
+          gen_runtime_epilogue();
+          fprintf(out, "  test rax, rax\n");
+          fprintf(out, "  jz alloc_trap\n");
+          fprintf(out, "  mov rbx, rax\n");
+          fprintf(out, "  mov rdx, [rbp - %d]\n", (src + 1) * 8);
+          fprintf(out, "  test rdx, rdx\n");
+          fprintf(out, "  jz null_trap\n");
+          fprintf(out, "  mov rcx, rbx\n");
+          fprintf(out, "  mov r8, %lld\n", size);
+          gen_runtime_prologue();
+          fprintf(out, "  call memcpy\n");
+          gen_runtime_epilogue();
+          fprintf(out, "  mov [rbp - %d], rbx\n", (slot + 1) * 8);
+        }
+      } else if (var_types[slot] == TYPE_FLOAT && given == TYPE_INT) {
         gen_expression(node->var_decl.value);
         fprintf(out, "  cvtsi2sd xmm0, rax\n");
         fprintf(out, "  movq rax, xmm0\n");
@@ -1397,8 +2649,65 @@ static void gen_statement(Node *node) {
     break;
   }
   case NODE_ASSIGNMENT: {
-    int slot = require_var(node, node->assignment.name);
+    int slot = find_var(node->assignment.name);
+    if (slot < 0) {
+      codegen_error(node, "Variable '%s' not declared", node->assignment.name);
+    }
+    if (var_is_param[slot] && !no_param_warn &&
+        var_types[slot] != TYPE_STRUCT && var_types[slot] != TYPE_CLASS) {
+      codegen_warning(node, "Parameter '%s' should be accessed as self.%s",
+                      node->assignment.name, node->assignment.name);
+    }
+    var_used[slot] = 1;
     ValueType given = expr_type(node->assignment.value);
+    if (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS) {
+      const char *kind = var_type_name[slot];
+      if (node->assignment.value->type == NODE_NEW) {
+        if (strcmp(node->assignment.value->new_expr.type_name, kind) != 0) {
+          codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
+                        node->assignment.value->new_expr.type_name, kind,
+                        node->assignment.name);
+        }
+        gen_expression(node->assignment.value);
+        fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+      } else if (given == var_types[slot] &&
+                 node->assignment.value->type == NODE_IDENTIFIER) {
+        const char *given_kind = instance_type_of(node->assignment.value);
+        if (given_kind == NULL || strcmp(given_kind, kind) != 0) {
+          codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
+                        given_kind != NULL ? given_kind : type_name(given),
+                        kind, node->assignment.name);
+        }
+        int nfields = 0;
+        if (var_types[slot] == TYPE_STRUCT) {
+          nfields = struct_defs[find_struct(kind)].nfields;
+        } else {
+          nfields = class_defs[find_class(kind)].nfields;
+        }
+        long long size = nfields == 0 ? 8 : (long long)nfields * 8;
+        fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+        fprintf(out, "  test rax, rax\n");
+        fprintf(out, "  jz null_trap\n");
+        fprintf(out, "  mov r11, rax\n");
+        int src = find_var(node->assignment.value->identifier.name);
+        fprintf(out, "  mov rdx, [rbp - %d]\n", (src + 1) * 8);
+        fprintf(out, "  test rdx, rdx\n");
+        fprintf(out, "  jz null_trap\n");
+        fprintf(out, "  mov rcx, r11\n");
+        fprintf(out, "  mov r8, %lld\n", size);
+        gen_runtime_prologue();
+        fprintf(out, "  call memcpy\n");
+        gen_runtime_epilogue();
+      } else if (given == TYPE_INT &&
+                 node->assignment.value->type == NODE_FUNC_CALL) {
+        gen_expression(node->assignment.value);
+        fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+      } else {
+        codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
+                      type_name(given), kind, node->assignment.name);
+      }
+      break;
+    }
     if (!types_compatible(var_types[slot], given)) {
       codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
                     type_name(given), type_name(var_types[slot]),
@@ -1431,6 +2740,21 @@ static void gen_statement(Node *node) {
   }
   case NODE_ADD_ASSIGN: {
     int slot = require_var(node, node->add_assign.name);
+    if (var_types[slot] == TYPE_STRING) {
+      ValueType sgiven = expr_type(node->add_assign.value);
+      if (sgiven != TYPE_STRING) {
+        codegen_error(node->add_assign.value,
+                      "Cannot concatenate string with %s", type_name(sgiven));
+      }
+      fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+      fprintf(out, "  push rax\n");
+      gen_expression(node->add_assign.value);
+      fprintf(out, "  mov rbx, rax\n");
+      fprintf(out, "  pop rax\n");
+      gen_string_concat();
+      fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+      break;
+    }
     if (!is_numeric(var_types[slot])) {
       codegen_error(node, "Cannot use += on non-numeric type '%s'",
                     type_name(var_types[slot]));
@@ -1482,6 +2806,9 @@ static void gen_statement(Node *node) {
   }
   case NODE_SUB_ASSIGN: {
     int slot = require_var(node, node->sub_assign.name);
+    if (var_types[slot] == TYPE_STRING) {
+      codegen_error(node, "Operator '-=' cannot be applied to string");
+    }
     if (!is_numeric(var_types[slot])) {
       codegen_error(node, "Cannot use -= on non-numeric type '%s'",
                     type_name(var_types[slot]));
@@ -1533,12 +2860,233 @@ static void gen_statement(Node *node) {
     fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
     break;
   }
+  case NODE_MEMBER_ASSIGN: {
+    const char *object = node->member_assign.object;
+    const char *member = node->member_assign.member;
+    const char *op = node->member_assign.op;
+    Node *value = node->member_assign.value;
+    int is_param_target = 0;
+    int target_slot = -1;
+    int field_off = -1;
+    ValueType field_type = TYPE_INT;
+    int this_field = 0;
+    if (strcmp(object, "self") == 0) {
+      int pslot = find_var(member);
+      if (pslot >= 0 && var_is_param[pslot]) {
+        is_param_target = 1;
+        target_slot = pslot;
+      } else if (in_method && cur_class >= 0 &&
+                 find_class_field(cur_class, member) >= 0) {
+        int f = find_class_field(cur_class, member);
+        this_field = 1;
+        field_off = f * 8;
+        field_type = class_defs[cur_class].fields[f].type;
+        var_used[find_var("this ")] = 1;
+      } else if (in_method && cur_class >= 0) {
+        codegen_error(node, "'%s' is not a parameter or field of class '%s'",
+                      member, class_defs[cur_class].name);
+      } else {
+        int pslot2 = find_var(member);
+        if (pslot2 >= 0 && var_is_param[pslot2]) {
+          is_param_target = 1;
+          target_slot = pslot2;
+        } else {
+          require_param(node, member);
+        }
+      }
+    } else {
+      if (find_struct(object) >= 0 || find_class(object) >= 0) {
+        codegen_error(node, "Cannot use type '%s' as a value, use an instance",
+                      object);
+      }
+      int slot = find_var(object);
+      if (slot < 0) {
+        codegen_error(node, "Variable '%s' not declared", object);
+      }
+      var_used[slot] = 1;
+      if (var_types[slot] == TYPE_STRUCT) {
+        int s = find_struct(var_type_name[slot]);
+        int f = find_struct_field(s, member);
+        if (f < 0) {
+          codegen_error(node, "Struct '%s' has no field '%s'",
+                        var_type_name[slot], member);
+        }
+        target_slot = slot;
+        field_off = f * 8;
+        field_type = struct_defs[s].fields[f].type;
+      } else if (var_types[slot] == TYPE_CLASS) {
+        int c = find_class(var_type_name[slot]);
+        int f = find_class_field(c, member);
+        if (f < 0) {
+          codegen_error(node, "Class '%s' has no field '%s'",
+                        var_type_name[slot], member);
+        }
+        target_slot = slot;
+        field_off = f * 8;
+        field_type = class_defs[c].fields[f].type;
+      } else {
+        codegen_error(node, "'%s' is not a struct or class instance", object);
+      }
+    }
+    if (is_param_target) {
+      Node tmp;
+      memset(&tmp, 0, sizeof(tmp));
+      tmp.line = node->line;
+      tmp.col = node->col;
+      tmp.width = node->width;
+      if (strcmp(op, "=") == 0) {
+        tmp.type = NODE_ASSIGNMENT;
+        tmp.assignment.name = (char *)member;
+        tmp.assignment.value = value;
+      } else if (strcmp(op, "+=") == 0) {
+        tmp.type = NODE_ADD_ASSIGN;
+        tmp.add_assign.name = (char *)member;
+        tmp.add_assign.value = value;
+      } else {
+        tmp.type = NODE_SUB_ASSIGN;
+        tmp.sub_assign.name = (char *)member;
+        tmp.sub_assign.value = value;
+      }
+      int saved = no_param_warn;
+      no_param_warn = 1;
+      gen_statement(&tmp);
+      no_param_warn = saved;
+      break;
+    }
+    ValueType given = peek_type(value);
+    {
+      ValueType checked = expr_type(value);
+      (void)checked;
+    }
+    if (field_type == TYPE_STRING && strcmp(op, "-=") == 0) {
+      codegen_error(node, "Operator '-=' cannot be applied to string");
+    }
+    if (field_type == TYPE_STRING && given != TYPE_STRING) {
+      if (strcmp(op, "=") == 0) {
+        codegen_error(value, "Cannot assign %s to string field '%s'",
+                      type_name(given), member);
+      }
+      codegen_error(value, "Cannot concatenate string with %s",
+                    type_name(given));
+    }
+    if (field_type != TYPE_STRING && !is_numeric(given)) {
+      codegen_error(value, "Cannot assign %s to %s field '%s'",
+                    type_name(given), field_type == TYPE_FLOAT ? "num" : "bool",
+                    member);
+    }
+    if (strcmp(op, "=") == 0) {
+      gen_expression(value);
+      fprintf(out, "  push rax\n");
+      if (this_field) {
+        int tslot = find_var("this ");
+        fprintf(out, "  mov rax, [rbp - %d]\n", (tslot + 1) * 8);
+      } else {
+        fprintf(out, "  mov rax, [rbp - %d]\n", (target_slot + 1) * 8);
+      }
+      fprintf(out, "  test rax, rax\n");
+      fprintf(out, "  jz null_trap\n");
+      fprintf(out, "  pop rdx\n");
+      if (field_type == TYPE_FLOAT &&
+          (given == TYPE_INT || given == TYPE_BOOL)) {
+        fprintf(out, "  cvtsi2sd xmm0, rdx\n");
+        fprintf(out, "  movq rdx, xmm0\n");
+      } else if (field_type == TYPE_BOOL && given == TYPE_FLOAT) {
+        fprintf(out, "  movq xmm0, rdx\n");
+        fprintf(out, "  cvttsd2si rdx, xmm0\n");
+      }
+      fprintf(out, "  mov [rax + %d], rdx\n", field_off);
+      break;
+    }
+    if (field_type == TYPE_STRING) {
+      if (strcmp(op, "-=") == 0) {
+        codegen_error(node, "Operator '-=' cannot be applied to string");
+      }
+      if (this_field) {
+        int tslot = find_var("this ");
+        fprintf(out, "  mov rax, [rbp - %d]\n", (tslot + 1) * 8);
+      } else {
+        fprintf(out, "  mov rax, [rbp - %d]\n", (target_slot + 1) * 8);
+      }
+      fprintf(out, "  test rax, rax\n");
+      fprintf(out, "  jz null_trap\n");
+      fprintf(out, "  push rax\n");
+      fprintf(out, "  mov rax, [rsp]\n");
+      fprintf(out, "  mov rcx, [rax + %d]\n", field_off);
+      fprintf(out, "  push rcx\n");
+      gen_expression(value);
+      fprintf(out, "  mov rbx, rax\n");
+      fprintf(out, "  pop rax\n");
+      gen_string_concat();
+      fprintf(out, "  mov r11, rax\n");
+      fprintf(out, "  pop rax\n");
+      fprintf(out, "  test rax, rax\n");
+      fprintf(out, "  jz null_trap\n");
+      fprintf(out, "  mov [rax + %d], r11\n", field_off);
+      break;
+    }
+    if (this_field) {
+      int tslot = find_var("this ");
+      fprintf(out, "  mov rax, [rbp - %d]\n", (tslot + 1) * 8);
+    } else {
+      fprintf(out, "  mov rax, [rbp - %d]\n", (target_slot + 1) * 8);
+    }
+    fprintf(out, "  test rax, rax\n");
+    fprintf(out, "  jz null_trap\n");
+    fprintf(out, "  push rax\n");
+    fprintf(out, "  mov rax, [rsp]\n");
+    fprintf(out, "  mov rcx, [rax + %d]\n", field_off);
+    fprintf(out, "  push rcx\n");
+    gen_expression(value);
+    if (field_type == TYPE_FLOAT) {
+      if (given == TYPE_FLOAT) {
+        fprintf(out, "  movq xmm1, rax\n");
+      } else {
+        fprintf(out, "  cvtsi2sd xmm1, rax\n");
+      }
+      fprintf(out, "  pop rcx\n");
+      fprintf(out, "  movq xmm0, rcx\n");
+      if (strcmp(op, "+=") == 0) {
+        fprintf(out, "  addsd xmm0, xmm1\n");
+      } else {
+        fprintf(out, "  subsd xmm0, xmm1\n");
+      }
+      fprintf(out, "  movq rcx, xmm0\n");
+    } else {
+      if (given == TYPE_FLOAT) {
+        fprintf(out, "  movq xmm0, rax\n");
+        fprintf(out, "  cvttsd2si rbx, xmm0\n");
+      } else {
+        fprintf(out, "  mov rbx, rax\n");
+      }
+      fprintf(out, "  pop rcx\n");
+      fprintf(out, "  mov rax, rcx\n");
+      if (strcmp(op, "+=") == 0) {
+        fprintf(out, "  add rax, rbx\n");
+      } else {
+        fprintf(out, "  sub rax, rbx\n");
+      }
+      fprintf(out, "  jo overflow_trap\n");
+      fprintf(out, "  mov rcx, rax\n");
+    }
+    fprintf(out, "  pop rax\n");
+    fprintf(out, "  test rax, rax\n");
+    fprintf(out, "  jz null_trap\n");
+    fprintf(out, "  mov [rax + %d], rcx\n", field_off);
+    break;
+  }
+  case NODE_METHOD_CALL:
+    gen_method_call(node);
+    break;
   case NODE_PRINT: {
     Node *value = node->print_stmt.value;
     if (value != NULL && value->type == NODE_STRING_LITERAL) {
       gen_print_string(value, value->string_literal.value);
     } else if (value != NULL && value->type == NODE_IDENTIFIER) {
       int slot = require_var(value, value->identifier.name);
+      if (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS) {
+        codegen_error(value, "Cannot print %s '%s' directly",
+                      var_type_name[slot], value->identifier.name);
+      }
       if (var_types[slot] == TYPE_STRING) {
         fprintf(out, "  lea rcx, [rel fmt_str]\n");
         fprintf(out, "  mov rdx, [rbp - %d]\n", (slot + 1) * 8);
@@ -1562,6 +3110,16 @@ static void gen_statement(Node *node) {
       }
     } else {
       ValueType etype = peek_type(value);
+      if (etype == TYPE_STRUCT || etype == TYPE_CLASS) {
+        const char *k = instance_type_of(value);
+        if (value->type == NODE_NEW) {
+          k = value->new_expr.type_name;
+        }
+        if (k != NULL) {
+          codegen_error(value, "Cannot print %s directly", k);
+        }
+        codegen_error(value, "Cannot print struct or class values directly");
+      }
       if (etype == TYPE_STRING) {
         gen_expression(value);
         fprintf(out, "  lea rcx, [rel fmt_str]\n");
@@ -1590,7 +3148,47 @@ static void gen_statement(Node *node) {
     break;
   }
   case NODE_RETURN: {
-    gen_expression(node->return_stmt.value);
+    if (in_method && cur_class >= 0 && cur_method >= 0) {
+      const char *rt = class_defs[cur_class].methods[cur_method].ret_type;
+      const char *mname = class_defs[cur_class].methods[cur_method].name;
+      ValueType given = peek_type(node->return_stmt.value);
+      {
+        ValueType checked = expr_type(node->return_stmt.value);
+        (void)checked;
+      }
+      if (strcmp(rt, "string") == 0) {
+        if (given != TYPE_STRING) {
+          codegen_error(node->return_stmt.value,
+                        "Method '%s' must return string, got %s", mname,
+                        type_name(given));
+        }
+        gen_expression(node->return_stmt.value);
+      } else if (strcmp(rt, "bool") == 0) {
+        if (!is_numeric(given)) {
+          codegen_error(node->return_stmt.value,
+                        "Method '%s' must return bool, got %s", mname,
+                        type_name(given));
+        }
+        gen_expression(node->return_stmt.value);
+        if (given == TYPE_FLOAT) {
+          fprintf(out, "  movq xmm0, rax\n");
+          fprintf(out, "  cvttsd2si rax, xmm0\n");
+        }
+      } else {
+        if (!is_numeric(given)) {
+          codegen_error(node->return_stmt.value,
+                        "Method '%s' must return num, got %s", mname,
+                        type_name(given));
+        }
+        gen_expression(node->return_stmt.value);
+        if (given == TYPE_INT || given == TYPE_BOOL) {
+          fprintf(out, "  cvtsi2sd xmm0, rax\n");
+          fprintf(out, "  movq rax, xmm0\n");
+        }
+      }
+    } else {
+      gen_expression(node->return_stmt.value);
+    }
     if (in_function) {
       fprintf(out, "  mov rsp, rbp\n");
       fprintf(out, "  pop rbp\n");
@@ -1705,6 +3303,15 @@ static void gen_statement(Node *node) {
   case NODE_FOR: {
     int arr = find_array(node->for_stmt.array_name);
     if (arr < 0) {
+      int vslot = find_var(node->for_stmt.array_name);
+      if (vslot >= 0) {
+        const char *kind =
+            (var_types[vslot] == TYPE_STRUCT || var_types[vslot] == TYPE_CLASS)
+                ? var_type_name[vslot]
+                : type_name(var_types[vslot]);
+        codegen_error(node, "Cannot iterate over %s '%s', only arrays can",
+                      kind, node->for_stmt.array_name);
+      }
       codegen_error(node, "Array '%s' is not declared",
                     node->for_stmt.array_name);
     }
@@ -1778,9 +3385,10 @@ static void gen_function(Node *node) {
   for (Node *p = node->function.params; p != NULL; p = p->right) {
     const char *param_name = NULL;
     ValueType param_type = TYPE_INT;
+    const char *param_kind = NULL;
     if (p->type == NODE_VAR_DECL) {
       param_name = p->var_decl.name;
-      param_type = type_keyword(p->var_decl.var_type);
+      param_type = resolve_decl_type(p->var_decl.var_type, p, &param_kind);
       if (param_type == TYPE_INT && sig_idx >= 0 && param_index < 32 &&
           sig_param_float[sig_idx][param_index]) {
         param_type = TYPE_FLOAT;
@@ -1795,6 +3403,12 @@ static void gen_function(Node *node) {
       codegen_error(p, "Unexpected parameter in codegen");
     }
     int slot = add_var(p, param_name, param_type, 1);
+    if (param_kind != NULL) {
+      size_t kn = strlen(param_kind);
+      var_type_name[slot] = malloc(kn + 1);
+      memcpy(var_type_name[slot], param_kind, kn);
+      var_type_name[slot][kn] = '\0';
+    }
     if (param_index < 4) {
       fprintf(out, "  mov [rbp - %d], %s\n", (slot + 1) * 8,
               param_regs[param_index]);
@@ -1817,6 +3431,109 @@ static void gen_function(Node *node) {
 }
 
 /**
+ * @brief Generates code for a class method body
+ * @param class_idx Class index from find_class
+ * @param method_idx Method index from find_method
+ * @details The instance pointer travels as hidden first argument (rcx)
+ * and is spilled to a hidden "this " slot. Inside the body, self.X
+ * resolves to a parameter first, then to a class field.
+ */
+static void gen_method(int class_idx, int method_idx) {
+  ClassDef *cd = &class_defs[class_idx];
+  MethodDef *md = &cd->methods[method_idx];
+  char label[128];
+  method_label(cd->name, md->name, label);
+  int saved_count = var_count;
+  int saved_arrays = array_count;
+  int saved_in_function = in_function;
+  int saved_in_method = in_method;
+  int saved_class = cur_class;
+  int saved_method = cur_method;
+  var_count = 0;
+  array_count = 0;
+  in_function = 1;
+  in_method = 1;
+  cur_class = class_idx;
+  cur_method = method_idx;
+
+  fprintf(out, "%s:\n", label);
+  gen_prologue();
+
+  int this_slot = add_var(NULL, "this ", TYPE_CLASS, 1);
+  {
+    size_t kn = strlen(cd->name);
+    var_type_name[this_slot] = malloc(kn + 1);
+    memcpy(var_type_name[this_slot], cd->name, kn);
+    var_type_name[this_slot][kn] = '\0';
+  }
+  fprintf(out, "  mov [rbp - %d], rcx\n", (this_slot + 1) * 8);
+
+  int sig_idx = -1;
+  for (int s = 0; s < sig_count; s++) {
+    if (strcmp(sig_names[s], label) == 0) {
+      sig_idx = s;
+      break;
+    }
+  }
+  const char *param_regs[4] = {"rcx", "rdx", "r8", "r9"};
+  int param_index = 0;
+  for (Node *p = md->params; p != NULL; p = p->right) {
+    const char *param_name = NULL;
+    ValueType param_type = TYPE_INT;
+    const char *param_kind = NULL;
+    if (p->type == NODE_VAR_DECL) {
+      param_name = p->var_decl.name;
+      param_type = resolve_decl_type(p->var_decl.var_type, p, &param_kind);
+      if (param_type == TYPE_INT && sig_idx >= 0 && param_index < 32 &&
+          sig_param_float[sig_idx][param_index]) {
+        param_type = TYPE_FLOAT;
+      }
+    } else if (p->type == NODE_IDENTIFIER) {
+      param_name = p->identifier.name;
+      if (sig_idx >= 0 && param_index < 32 &&
+          sig_param_float[sig_idx][param_index]) {
+        param_type = TYPE_FLOAT;
+      }
+    } else {
+      codegen_error(p, "Unexpected parameter in codegen");
+    }
+    if (find_class_field(class_idx, param_name) >= 0) {
+      codegen_warning(p, "Parameter '%s' shadows a field of class '%s'",
+                      param_name, cd->name);
+    }
+    int slot = add_var(p, param_name, param_type, 1);
+    if (param_kind != NULL) {
+      size_t kn = strlen(param_kind);
+      var_type_name[slot] = malloc(kn + 1);
+      memcpy(var_type_name[slot], param_kind, kn);
+      var_type_name[slot][kn] = '\0';
+    }
+    int abs_idx = param_index + 1;
+    if (abs_idx < 4) {
+      fprintf(out, "  mov [rbp - %d], %s\n", (slot + 1) * 8,
+              param_regs[abs_idx]);
+    } else {
+      fprintf(out, "  mov rax, [rbp + %d]\n", 48 + 8 * (abs_idx - 4));
+      fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+    }
+    param_index++;
+  }
+
+  gen_block(md->body);
+
+  fprintf(out, "  mov rsp, rbp\n");
+  fprintf(out, "  pop rbp\n");
+  fprintf(out, "  ret\n");
+
+  var_count = saved_count;
+  array_count = saved_arrays;
+  in_function = saved_in_function;
+  in_method = saved_in_method;
+  cur_class = saved_class;
+  cur_method = saved_method;
+}
+
+/**
  * @brief Generates NASM x86-64 assembly for a Jot program
  * @param root Root of the AST (linked list of top level statements)
  * @param filename Output assembly file path
@@ -1830,6 +3547,10 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   var_count = 0;
   frame_size = 2048;
   in_function = 0;
+  in_method = 0;
+  cur_class = -1;
+  cur_method = -1;
+  no_param_warn = 0;
   has_user_main = 0;
 
   for (Node *s = root; s != NULL; s = s->right) {
@@ -1848,6 +3569,137 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
       sig_names[sig_count][len] = '\0';
       sig_params[sig_count] = s->function.params;
       sig_count++;
+    }
+  }
+  struct_count = 0;
+  class_count = 0;
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_STRUCT_DEF) {
+      for (int i = 0; i < sig_count; i++) {
+        if (strcmp(sig_names[i], s->struct_def.name) == 0) {
+          collect_error(s, "Struct '%s' is already defined",
+                        s->struct_def.name);
+        }
+      }
+      for (int i = 0; i < struct_count; i++) {
+        if (strcmp(struct_defs[i].name, s->struct_def.name) == 0) {
+          collect_error(s, "Struct '%s' is already defined",
+                        s->struct_def.name);
+        }
+      }
+      for (int i = 0; i < class_count; i++) {
+        if (strcmp(class_defs[i].name, s->struct_def.name) == 0) {
+          collect_error(s, "Struct '%s' is already defined",
+                        s->struct_def.name);
+        }
+      }
+      if (struct_count >= MAX_STRUCTS) {
+        collect_error(s, "Too many structs defined");
+      }
+      StructDef *d = &struct_defs[struct_count];
+      size_t len = strlen(s->struct_def.name);
+      d->name = malloc(len + 1);
+      memcpy(d->name, s->struct_def.name, len);
+      d->name[len] = '\0';
+      d->is_public = s->struct_def.is_public;
+      d->nfields = 0;
+      for (Node *f = s->struct_def.fields; f != NULL; f = f->right) {
+        if (d->nfields >= MAX_FIELDS) {
+          collect_error(f, "Too many fields in struct '%s'", d->name);
+        }
+        size_t fl = strlen(f->var_decl.name);
+        d->fields[d->nfields].name = malloc(fl + 1);
+        memcpy(d->fields[d->nfields].name, f->var_decl.name, fl);
+        d->fields[d->nfields].name[fl] = '\0';
+        if (strcmp(f->var_decl.var_type, "string") == 0) {
+          d->fields[d->nfields].type = TYPE_STRING;
+        } else if (strcmp(f->var_decl.var_type, "bool") == 0) {
+          d->fields[d->nfields].type = TYPE_BOOL;
+        } else {
+          d->fields[d->nfields].type = TYPE_FLOAT;
+        }
+        d->nfields++;
+      }
+      struct_count++;
+    } else if (s->type == NODE_CLASS_DEF) {
+      for (int i = 0; i < sig_count; i++) {
+        if (strcmp(sig_names[i], s->class_def.name) == 0) {
+          collect_error(s, "Class '%s' is already defined", s->class_def.name);
+        }
+      }
+      for (int i = 0; i < struct_count; i++) {
+        if (strcmp(struct_defs[i].name, s->class_def.name) == 0) {
+          collect_error(s, "Class '%s' is already defined", s->class_def.name);
+        }
+      }
+      for (int i = 0; i < class_count; i++) {
+        if (strcmp(class_defs[i].name, s->class_def.name) == 0) {
+          collect_error(s, "Class '%s' is already defined", s->class_def.name);
+        }
+      }
+      if (class_count >= MAX_CLASSES) {
+        collect_error(s, "Too many classes defined");
+      }
+      ClassDef *d = &class_defs[class_count];
+      size_t len = strlen(s->class_def.name);
+      d->name = malloc(len + 1);
+      memcpy(d->name, s->class_def.name, len);
+      d->name[len] = '\0';
+      d->is_public = s->class_def.is_public;
+      d->nfields = 0;
+      for (Node *f = s->class_def.fields; f != NULL; f = f->right) {
+        if (d->nfields >= MAX_FIELDS) {
+          collect_error(f, "Too many fields in class '%s'", d->name);
+        }
+        size_t fl = strlen(f->var_decl.name);
+        d->fields[d->nfields].name = malloc(fl + 1);
+        memcpy(d->fields[d->nfields].name, f->var_decl.name, fl);
+        d->fields[d->nfields].name[fl] = '\0';
+        if (strcmp(f->var_decl.var_type, "string") == 0) {
+          d->fields[d->nfields].type = TYPE_STRING;
+        } else if (strcmp(f->var_decl.var_type, "bool") == 0) {
+          d->fields[d->nfields].type = TYPE_BOOL;
+        } else {
+          d->fields[d->nfields].type = TYPE_FLOAT;
+        }
+        d->nfields++;
+      }
+      d->nmethods = 0;
+      for (Node *m = s->class_def.methods; m != NULL; m = m->right) {
+        if (d->nmethods >= MAX_METHODS) {
+          collect_error(m, "Too many methods in class '%s'", d->name);
+        }
+        if (strcmp(m->method_def.ret_type, "num") != 0 &&
+            strcmp(m->method_def.ret_type, "bool") != 0 &&
+            strcmp(m->method_def.ret_type, "string") != 0) {
+          collect_error(m, "Method '%s' must return num, bool or string",
+                        m->method_def.name);
+        }
+        size_t ml = strlen(m->method_def.name);
+        d->methods[d->nmethods].name = malloc(ml + 1);
+        memcpy(d->methods[d->nmethods].name, m->method_def.name, ml);
+        d->methods[d->nmethods].name[ml] = '\0';
+        size_t rl = strlen(m->method_def.ret_type);
+        d->methods[d->nmethods].ret_type = malloc(rl + 1);
+        memcpy(d->methods[d->nmethods].ret_type, m->method_def.ret_type, rl);
+        d->methods[d->nmethods].ret_type[rl] = '\0';
+        d->methods[d->nmethods].params = m->method_def.params;
+        d->methods[d->nmethods].body = m->method_def.body;
+        d->methods[d->nmethods].line = m->line;
+        d->methods[d->nmethods].col = m->col;
+        d->nmethods++;
+        if (sig_count < 256) {
+          char label[128];
+          method_label(d->name, m->method_def.name, label);
+          size_t ll = strlen(label);
+          sig_names[sig_count] = malloc(ll + 1);
+          memcpy(sig_names[sig_count], label, ll);
+          sig_names[sig_count][ll] = '\0';
+          sig_params[sig_count] = m->method_def.params;
+          sig_count++;
+        }
+      }
+      class_count++;
     }
   }
   for (int i = 0; i < sig_count; i++) {
@@ -1870,20 +3722,46 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
         break;
       }
     }
+    for (int c = 0; c < class_count && !sig_is_bool_only[i]; c++) {
+      for (int m = 0; m < class_defs[c].nmethods; m++) {
+        char label[128];
+        method_label(class_defs[c].name, class_defs[c].methods[m].name, label);
+        if (strcmp(label, sig_names[i]) == 0) {
+          int found = 0;
+          int all_bool = 1;
+          scan_returns_bool_only(class_defs[c].methods[m].body, &found,
+                                 &all_bool);
+          if (found && all_bool) {
+            sig_is_bool_only[i] = 1;
+          }
+          break;
+        }
+      }
+    }
   }
   scan_float_calls(root);
+  scan_method_float_calls(root);
 
   collect_strings(root);
 
   out = fopen(output, "w");
   if (!out) {
-    codegen_error(NULL, "Could not open output file '%s'", output);
+    char message[256];
+    snprintf(message, sizeof(message), "Could not open output file '%s'",
+             output);
+    term_report(TERM_ERROR, codegen_source, 1, 1, 1, message);
+    return;
   }
 
   fprintf(out, "global main\n");
   fprintf(out, "extern printf\n");
   fprintf(out, "extern scanf\n");
   fprintf(out, "extern exit\n");
+  fprintf(out, "extern malloc\n");
+  fprintf(out, "extern strlen\n");
+  fprintf(out, "extern strcmp\n");
+  fprintf(out, "extern memcpy\n");
+  fprintf(out, "extern fflush\n");
   gen_data_section();
   fprintf(out, "section .text\n");
 
@@ -1893,8 +3771,9 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   fprintf(out, "  mov [rel stack_floor], rax\n");
   gen_prologue();
   for (Node *s = root; s != NULL; s = s->right) {
-    if (s->type != NODE_FUNCTION) {
-      gen_statement(s);
+    if (s->type != NODE_FUNCTION && s->type != NODE_STRUCT_DEF &&
+        s->type != NODE_CLASS_DEF) {
+      try_gen_statement(s);
     }
   }
   check_unused_vars(0);
@@ -1904,7 +3783,23 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
 
   for (Node *s = root; s != NULL; s = s->right) {
     if (s->type == NODE_FUNCTION) {
-      gen_function(s);
+      jmp_buf saved;
+      memcpy(saved, gen_jmp, sizeof(gen_jmp));
+      if (setjmp(gen_jmp) == 0) {
+        gen_function(s);
+      }
+      memcpy(gen_jmp, saved, sizeof(gen_jmp));
+    }
+  }
+
+  for (int c = 0; c < class_count; c++) {
+    for (int m = 0; m < class_defs[c].nmethods; m++) {
+      jmp_buf saved;
+      memcpy(saved, gen_jmp, sizeof(gen_jmp));
+      if (setjmp(gen_jmp) == 0) {
+        gen_method(c, m);
+      }
+      memcpy(gen_jmp, saved, sizeof(gen_jmp));
     }
   }
 
@@ -1912,6 +3807,9 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   gen_trap("divzero_trap", "fmt_divzero");
   gen_trap("stack_overflow_trap", "fmt_stack");
   gen_trap("input_error_trap", "fmt_invalid");
+  gen_trap("index_trap", "fmt_index");
+  gen_trap("alloc_trap", "fmt_alloc");
+  gen_trap("null_trap", "fmt_null");
 
   fclose(out);
 }

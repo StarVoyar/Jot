@@ -1,0 +1,25 @@
+struct private object {
+  num size;
+  string label;
+}
+
+fn public main() {
+  object car = new object(200, "fast");
+  print(car.size);
+  print("\n");
+  print(car.label);
+  print("\n");
+  print("size={car.size} label={car.label}\n");
+  car.size = 300;
+  print(car.size);
+  print("\n");
+  car.size += 50;
+  print(car.size);
+  print("\n");
+  car.label += "!";
+  print(car.label);
+  print("\n");
+  return(0);
+}
+
+main();

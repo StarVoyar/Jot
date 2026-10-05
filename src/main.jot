@@ -1,0 +1,33 @@
+struct private object {
+  num size;
+  string label;
+}
+
+class public dog {
+  num age;
+
+  string describe() {
+    print("age={self.age}\n");
+    return("done");
+  }
+}
+
+fn public main() {
+  num x = 2;
+  num y = x + 4;
+  print("Y: {y} \n");
+  string greeting = "hello" + " jot";
+  print(greeting);
+  print("\n");
+  print(len(greeting));
+  print("\n");
+  object car = new object(200, "fast");
+  print(car.size);
+  print("\n");
+  dog d = new dog(3);
+  print(d.describe());
+  print("\n");
+  return(0);
+}
+
+main();

@@ -1,0 +1,17 @@
+class public dog {
+  string bark() {
+    string sound = "BARK!";
+    return(sound);
+  }
+}
+
+fn public main() {
+  dog d = new dog();
+  d.bark();
+  string s = d.bark();
+  print(s);
+  print("\n");
+  return(0);
+}
+
+main();

@@ -1,0 +1,27 @@
+class public dog {
+  num age;
+  string name;
+
+  string describe() {
+    print("age={self.age} name={self.name}\n");
+    return(self.name);
+  }
+
+  num older(num years) {
+    self.age += self.years;
+    return(self.age);
+  }
+}
+
+fn public main() {
+  dog d = new dog(3, "rex");
+  print(d.describe());
+  print("\n");
+  print(d.older(2));
+  print("\n");
+  print(d.age);
+  print("\n");
+  return(0);
+}
+
+main();

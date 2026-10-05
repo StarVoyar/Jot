@@ -1,0 +1,14 @@
+fn public main() {
+  string a = "hello";
+  print(a == "hello");
+  print("\n");
+  print(a != "world");
+  print("\n");
+  print("abc" < "abd");
+  print("\n");
+  print("b" > "a");
+  print("\n");
+  return(0);
+}
+
+main();

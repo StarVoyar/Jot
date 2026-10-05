@@ -21,6 +21,7 @@
  * @param format printf-style message without the Error: prefix
  */
 static void compiler_error(const char *format, ...) {
+  term_tally(TERM_ERROR);
   int color = terminal_setup_colors();
   const char *mark = color ? "\x1b[1;31m" : "";
   const char *reset = color ? "\x1b[0m" : "";
@@ -36,6 +37,7 @@ static void compiler_error(const char *format, ...) {
  * @param format printf-style message without the Warning: prefix
  */
 static void compiler_warning(const char *format, ...) {
+  term_tally(TERM_WARNING);
   int color = terminal_setup_colors();
   const char *mark = color ? "\x1b[1;33m" : "";
   const char *reset = color ? "\x1b[0m" : "";
@@ -105,7 +107,7 @@ static char *extract_dir(const char *path) {
 
 /**
  * @brief Builds the default asm path for an input file
- * @param input Input file path (e.g. test/test.jot)
+ * @param input Input file path (e.g. src/main.jot)
  * @return Allocated output path (build/bin/generated/<base>.asm)
  */
 static char *default_out_path(const char *input) {
@@ -170,6 +172,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  lexer_set_file_name(argv[1]);
   Token *tokens = Lexer(file);
 
   if (debug) {
@@ -187,6 +190,12 @@ int main(int argc, char *argv[]) {
   char *default_out = NULL;
   const char *out_file = NULL;
   char *out_dir = NULL;
+
+  /* Every parse diagnostic has already printed; refuse to compile. */
+  if (term_errors() > 0) {
+    return 1;
+  }
+
   if (out_arg != NULL) {
     out_file = out_arg;
     out_dir = extract_dir(out_arg);
@@ -213,6 +222,12 @@ int main(int argc, char *argv[]) {
   }
 
   GenerateAssembly(ast, argv[1], out_file);
+  if (term_errors() > 0) {
+    /* Codegen diagnostics already printed: drop the partial asm, stop. */
+    remove(out_file);
+    free(default_out);
+    return 1;
+  }
   if (debug) {
     printf("Assembly written to '%s'\n", out_file);
   }

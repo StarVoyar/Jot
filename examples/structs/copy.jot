@@ -1,0 +1,22 @@
+struct private object {
+  num size;
+  string label;
+}
+
+fn public main() {
+  object car = new object(200, "fast");
+  object car2 = car;
+  print(car2.size);
+  print("\n");
+  car2.size = 1;
+  print(car.size);
+  print("\n");
+  print(car2.size);
+  print("\n");
+  car = new object(7, "new");
+  print(car.size);
+  print("\n");
+  return(0);
+}
+
+main();

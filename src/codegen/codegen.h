@@ -4,6 +4,7 @@
 #include "../parser/parser.h"
 #include "../terminal/terminal.h"
 
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,0 +1,21 @@
+fn public main() {
+  num x = 3;
+  if (x > 2) {
+    print("big\n");
+  } else {
+    print("small\n");
+  }
+  while (x > 0) {
+    print(x);
+    print("\n");
+    x = x - 1;
+  }
+  array nums = [10, 20, 30];
+  for (n in nums) {
+    print(n);
+    print("\n");
+  }
+  return(0);
+}
+
+main();

@@ -1,0 +1,9 @@
+fn public main() {
+  num age = input("Age: ");
+  print("You are ");
+  print(age);
+  print("\n");
+  return(0);
+}
+
+main();

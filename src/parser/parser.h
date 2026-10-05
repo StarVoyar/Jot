@@ -4,6 +4,7 @@
 #include "../lexer/lexer.h"
 #include "../terminal/terminal.h"
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +31,14 @@ typedef enum {
   NODE_ASSIGNMENT,     /**< Assignment statement */
   NODE_ADD_ASSIGN,     /**< Add and assign (+=) */
   NODE_SUB_ASSIGN,     /**< Subtract and assign (-=) */
-  NODE_MEMBER_ACCESS   /**< Member access (object.member) */
+  NODE_MEMBER_ACCESS,  /**< Member access (object.member) */
+  NODE_STRUCT_DEF,     /**< Struct definition */
+  NODE_CLASS_DEF,      /**< Class definition */
+  NODE_METHOD_DEF,     /**< Method definition (inside classes only) */
+  NODE_NEW,            /**< Struct/class instantiation (new Type(args)) */
+  NODE_INDEX,          /**< String indexing (base[index]) */
+  NODE_METHOD_CALL,    /**< Method call (object.method(args)) */
+  NODE_MEMBER_ASSIGN   /**< Member assignment (object.member = value) */
 } NodeType;
 
 /**
@@ -43,6 +51,7 @@ typedef struct Node {
   int line;           /**< 1-based source line of the construct */
   int col;            /**< 1-based source column of the construct */
   int width;          /**< Source width for squiggles, at least 1 */
+  const char *source; /**< File this node came from (borrowed, for imports) */
   union {
     struct {
       char *name;    /**< Function name */
@@ -120,6 +129,43 @@ typedef struct Node {
       char *object; /**< Object name */
       char *member; /**< Member name */
     } member_access;
+    struct {
+      char *name;          /**< Struct name */
+      int is_public;       /**< Non-zero if declared public (importable) */
+      struct Node *fields; /**< Field declarations (VAR_DECL, no values) */
+    } struct_def;
+    struct {
+      char *name;           /**< Class name */
+      int is_public;        /**< Non-zero if declared public (importable) */
+      struct Node *fields;  /**< Field declarations (VAR_DECL, no values) */
+      struct Node *methods; /**< Method definitions (METHOD_DEF nodes) */
+    } class_def;
+    struct {
+      char *ret_type;      /**< Method return type (num, bool, string) */
+      char *name;          /**< Method name */
+      int is_public;       /**< Always 0: methods are private to the class */
+      struct Node *params; /**< Method parameters (linked via right) */
+      struct Node *body;   /**< Method body (linked via right) */
+    } method_def;
+    struct {
+      char *type_name;   /**< Struct/class name after 'new' */
+      struct Node *args; /**< Constructor arguments (linked via right) */
+    } new_expr;
+    struct {
+      struct Node *base;  /**< Indexed expression (must be a string) */
+      struct Node *index; /**< Index expression (must be a number) */
+    } index;
+    struct {
+      char *object;      /**< Instance name (or "self" inside methods) */
+      char *method;      /**< Method name */
+      struct Node *args; /**< Call arguments (linked via right, NULL if none) */
+    } method_call;
+    struct {
+      char *object;       /**< Instance name (or "self" inside methods) */
+      char *member;       /**< Field name */
+      char *op;           /**< Assignment operator ("=", "+=", "-=") */
+      struct Node *value; /**< Assigned value */
+    } member_assign;
   };
 } Node;
 

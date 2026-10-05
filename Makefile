@@ -6,7 +6,7 @@ GENERATED_DIR = build/bin/generated
 CC = gcc
 CFLAGS = -Wall -Wextra
 NASM = nasm
-INPUT_FILE = test/test.jot
+INPUT_FILE = src/main.jot
 
 ifeq ($(OS),Windows_NT)
 	EXT = .exe

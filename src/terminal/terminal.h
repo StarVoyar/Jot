@@ -36,4 +36,24 @@ int terminal_setup_colors(void);
 void term_report(TermLevel level, const char *filename, int line, int col,
                  int width, const char *message);
 
+/**
+ * @brief Records one diagnostic of the given severity
+ * @param level Error or warning
+ * @details term_report calls this internally; plain prefix printers
+ * (like the compiler driver messages) call it to stay counted
+ */
+void term_tally(TermLevel level);
+
+/**
+ * @brief Returns the number of errors reported so far
+ * @return Count of TERM_ERROR diagnostics
+ */
+int term_errors(void);
+
+/**
+ * @brief Returns the number of warnings reported so far
+ * @return Count of TERM_WARNING diagnostics
+ */
+int term_warnings(void);
+
 #endif

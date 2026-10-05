@@ -15,6 +15,42 @@ static int line_start = 0;
 /** Column of the token being lexed (1-based) */
 static int token_col = 1;
 
+/** Maximum loaded files kept around for error snippets */
+#define MAX_LOADED_FILES 64
+
+/** Buffers of every lexed file, keyed by name, for error snippets */
+static char *loaded_names[MAX_LOADED_FILES];
+
+/** Buffers of every lexed file, parallel to loaded_names */
+static char *loaded_buffers[MAX_LOADED_FILES];
+
+/** Number of registered loaded files */
+static int loaded_count = 0;
+
+/** Name to record for the next Lexer call */
+static const char *pending_file_name;
+
+void lexer_set_file_name(const char *file) { pending_file_name = file; }
+
+/**
+ * @brief Registers a lexed buffer under its file name for later snippets
+ * @param name File name, may be NULL
+ * @param buffer Source buffer to keep
+ */
+static void register_loaded_file(const char *name, char *buffer) {
+  if (name == NULL || loaded_count >= MAX_LOADED_FILES) {
+    return;
+  }
+  for (int i = 0; i < loaded_count; i++) {
+    if (strcmp(loaded_names[i], name) == 0) {
+      return;
+    }
+  }
+  loaded_names[loaded_count] = (char *)name;
+  loaded_buffers[loaded_count] = buffer;
+  loaded_count++;
+}
+
 /**
  * @brief Lexes a source file into a stream of tokens
  * @param file Source file to lex
@@ -32,6 +68,7 @@ Token *Lexer(FILE *file) {
   fclose(file);
 
   global_buffer = (char *)buffer;
+  register_loaded_file(pending_file_name, (char *)buffer);
 
   int current_index = 0;
   tokens_index = 0;
@@ -146,10 +183,30 @@ Token *Lexer(FILE *file) {
  * @return Pointer into the source buffer, NULL if out of range
  */
 const char *lexer_source_line(int line, int *out_len) {
-  if (line < 1 || global_buffer == NULL) {
+  return lexer_source_line_in(NULL, line, out_len);
+}
+
+const char *lexer_source_line_in(const char *file, int line, int *out_len) {
+  if (line < 1) {
     return NULL;
   }
-  const char *start = global_buffer;
+  const char *base = global_buffer;
+  if (file != NULL) {
+    base = NULL;
+    for (int i = 0; i < loaded_count; i++) {
+      if (strcmp(loaded_names[i], file) == 0) {
+        base = loaded_buffers[i];
+        break;
+      }
+    }
+    if (base == NULL) {
+      return NULL;
+    }
+  }
+  if (base == NULL) {
+    return NULL;
+  }
+  const char *start = base;
   for (int i = 1; i < line; i++) {
     start = strchr(start, '\n');
     if (start == NULL) {
@@ -315,7 +372,8 @@ Token *lex_keyword(char current_char, int *current_index) {
       strcmp(keyword, "for") == 0 || strcmp(keyword, "fn") == 0 ||
       strcmp(keyword, "print") == 0 || strcmp(keyword, "num") == 0 ||
       strcmp(keyword, "bool") == 0 || strcmp(keyword, "string") == 0 ||
-      strcmp(keyword, "array") == 0) {
+      strcmp(keyword, "array") == 0 || strcmp(keyword, "struct") == 0 ||
+      strcmp(keyword, "class") == 0 || strcmp(keyword, "new") == 0) {
     token->type = KEYWORD;
     size_t len = strlen(keyword);
     token->value = malloc(len + 1);

@@ -1,0 +1,7 @@
+fn private add(num var1, num var2) {
+  num sum = self.var1 + self.var2;
+  print("Sum: {sum}\n");
+  return(sum);
+}
+
+add(10, 20);

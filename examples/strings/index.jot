@@ -1,0 +1,12 @@
+fn public main() {
+  string a = "hello";
+  print(a[0]);
+  print("\n");
+  print(a[1]);
+  print("\n");
+  print("abc"[2]);
+  print("\n");
+  return(0);
+}
+
+main();
