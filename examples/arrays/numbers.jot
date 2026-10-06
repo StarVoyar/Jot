@@ -1,0 +1,23 @@
+fn public main() {
+  arr nums = [10, 20, 30];
+  print(nums[0]);
+  print("\n");
+  print(nums[2]);
+  print("\n");
+  nums[1] = 99;
+  nums[0] += 5;
+  print(nums[0]);
+  print("\n");
+  print(nums[1]);
+  print("\n");
+  for (n in nums) {
+    print(n);
+    print("\n");
+  }
+  arr floats = [1.5, 2];
+  print(floats[1]);
+  print("\n");
+  return(0);
+}
+
+main();

@@ -1,0 +1,13 @@
+from [helpers.jot] import [add, greet, counter];
+
+fn public main() {
+  print(add(20, 22));
+  print("\n");
+  greet("jot");
+  counter c = new counter(7);
+  print(c.n);
+  print("\n");
+  return(0);
+}
+
+main();

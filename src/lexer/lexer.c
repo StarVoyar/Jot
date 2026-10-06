@@ -372,10 +372,10 @@ Token *lex_keyword(char current_char, int *current_index) {
       strcmp(keyword, "for") == 0 || strcmp(keyword, "fn") == 0 ||
       strcmp(keyword, "print") == 0 || strcmp(keyword, "num") == 0 ||
       strcmp(keyword, "bool") == 0 || strcmp(keyword, "str") == 0 ||
-      strcmp(keyword, "array") == 0 || strcmp(keyword, "struct") == 0 ||
+      strcmp(keyword, "arr") == 0 || strcmp(keyword, "struct") == 0 ||
       strcmp(keyword, "class") == 0 || strcmp(keyword, "new") == 0 ||
-      strcmp(keyword, "break") == 0 || strcmp(keyword, "continue") == 0 ||
-      strcmp(keyword, "null") == 0) {
+      strcmp(keyword, "inherit") == 0 || strcmp(keyword, "break") == 0 ||
+      strcmp(keyword, "continue") == 0 || strcmp(keyword, "null") == 0) {
     token->type = KEYWORD;
     size_t len = strlen(keyword);
     token->value = malloc(len + 1);

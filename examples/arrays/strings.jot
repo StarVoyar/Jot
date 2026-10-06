@@ -1,0 +1,18 @@
+fn public main() {
+  arr words = ["hello", "brave", "jot"];
+  print(words[0] + " " + words[1] + " " + words[2]);
+  print("\n");
+  words[1] = "new";
+  words[2] += "!";
+  print(words[1]);
+  print("\n");
+  print(words[2]);
+  print("\n");
+  for (w in words) {
+    print(len(w));
+    print("\n");
+  }
+  return(0);
+}
+
+main();

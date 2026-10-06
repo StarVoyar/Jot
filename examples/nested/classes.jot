@@ -1,0 +1,31 @@
+class public tag {
+  str label;
+
+  str render() {
+    return("<" + self.label + ">");
+  }
+}
+
+class public device {
+  num id;
+  tag name;
+
+  str describe() {
+    return(self.name.render());
+  }
+}
+
+fn public main() {
+  tag t = new tag("sensor");
+  device d = new device(7, t);
+  print("device {d.id} uses {d.name.label}\n");
+  print(d.describe());
+  print("\n");
+  d.name = new tag("actuator");
+  print("device {d.id} uses {d.name.label}\n");
+  print(t.label);
+  print("\n");
+  return(0);
+}
+
+main();

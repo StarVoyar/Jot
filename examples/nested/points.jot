@@ -1,0 +1,45 @@
+struct private point {
+  num x;
+  num y;
+}
+
+struct private line {
+  point start;
+  point end;
+}
+
+struct private box {
+  line edge;
+  str label;
+}
+
+fn public main() {
+  point p = new point(1, 2);
+  point q = new point(3, 4);
+  line l = new line(p, q);
+
+  print(l.start.x);
+  print("\n");
+  print(l.end.y);
+  print("\n");
+
+  box b = new box(l, "first");
+  print(b.edge.start.x);
+  print("\n");
+  print("box {b.label} from {b.edge.start.x},{b.edge.start.y} to {b.edge.end.x},{b.edge.end.y}\n");
+
+  l.start = q;
+  print(l.start.x);
+  print("\n");
+  print(p.x);
+  print("\n");
+
+  arr grid = [p, q];
+  grid[0].x += 10;
+  for (pt in grid) {
+    print("{pt.x},{pt.y}\n");
+  }
+  return(0);
+}
+
+main();

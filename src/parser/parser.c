@@ -321,6 +321,10 @@ static void collect_calls(Node *node, Node **out_calls, int *out_count,
       break;
     case NODE_METHOD_CALL:
       collect_calls(s->method_call.args, out_calls, out_count, cap);
+      collect_calls(s->method_call.object_expr, out_calls, out_count, cap);
+      break;
+    case NODE_MEMBER_ACCESS:
+      collect_calls(s->member_access.object_expr, out_calls, out_count, cap);
       break;
     case NODE_NEW:
       collect_calls(s->new_expr.args, out_calls, out_count, cap);
@@ -331,6 +335,7 @@ static void collect_calls(Node *node, Node **out_calls, int *out_count,
       break;
     case NODE_MEMBER_ASSIGN:
       collect_calls(s->member_assign.value, out_calls, out_count, cap);
+      collect_calls(s->member_assign.object_expr, out_calls, out_count, cap);
       break;
     case NODE_CLASS_DEF:
       for (Node *m = s->class_def.methods; m != NULL; m = m->right) {
@@ -343,6 +348,11 @@ static void collect_calls(Node *node, Node **out_calls, int *out_count,
       break;
     case NODE_ASSIGNMENT:
       collect_calls(s->assignment.value, out_calls, out_count, cap);
+      break;
+    case NODE_INDEX_ASSIGN:
+      collect_calls(s->index_assign.base, out_calls, out_count, cap);
+      collect_calls(s->index_assign.value, out_calls, out_count, cap);
+      collect_calls(s->index_assign.index, out_calls, out_count, cap);
       break;
     case NODE_ADD_ASSIGN:
       collect_calls(s->add_assign.value, out_calls, out_count, cap);
@@ -717,15 +727,23 @@ static Node *parse_new_expr() {
 
 /**
  * @brief Parses a member access (object.member)
- * @param object Object identifier node (already parsed)
+ * @param object Object identifier or arr[i] index node (already parsed)
  * @return AST node for member access
  */
 static Node *parse_member_access(Node *object) {
   Node *node = create_node(NODE_MEMBER_ACCESS);
-  size_t len = strlen(object->identifier.name);
-  node->member_access.object = malloc(len + 1);
-  memcpy(node->member_access.object, object->identifier.name, len);
-  node->member_access.object[len] = '\0';
+  size_t len;
+  if (object->type == NODE_IDENTIFIER) {
+    len = strlen(object->identifier.name);
+    node->member_access.object = malloc(len + 1);
+    memcpy(node->member_access.object, object->identifier.name, len);
+    node->member_access.object[len] = '\0';
+    node->member_access.object_expr = NULL;
+  } else {
+    /* any other base (arr[i], a.b) is kept as an expression */
+    node->member_access.object = NULL;
+    node->member_access.object_expr = object;
+  }
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
@@ -797,6 +815,49 @@ static Node *parse_func_call_expr() {
 }
 
 /**
+ * @brief Parses a parenthesized argument list into an args chain
+ * @details Current token must be '(', consumed through the matching ')'
+ * @return First argument node (linked via right), NULL when empty
+ */
+static Node *parse_call_arguments() {
+  current_token++;
+
+  Node *args = NULL;
+  Node *tail = NULL;
+
+  if (current_token->type != END_OF_TOKENS &&
+      strcmp(current_token->value, ")") != 0) {
+    while (1) {
+      Node *arg = parse_expression();
+      if (arg == NULL) {
+        return NULL;
+      }
+      if (args == NULL) {
+        args = arg;
+        tail = arg;
+      } else {
+        tail->right = arg;
+        tail = arg;
+      }
+      if (current_token->type != END_OF_TOKENS &&
+          strcmp(current_token->value, ",") == 0) {
+        current_token++;
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (current_token->type == END_OF_TOKENS ||
+      strcmp(current_token->value, ")") != 0) {
+    parse_error_expected("Expected ')' after arguments\n");
+  }
+  current_token++;
+
+  return args;
+}
+
+/**
  * @brief Parses a method call (object.member(args), member parsed already)
  * @param object Object name (borrowed, copied into the node)
  * @param member Member name (borrowed, copied into the node)
@@ -808,6 +869,7 @@ static Node *parse_method_call_expr(const char *object, const char *member) {
   node->method_call.object = malloc(len + 1);
   memcpy(node->method_call.object, object, len);
   node->method_call.object[len] = '\0';
+  node->method_call.object_expr = NULL;
   len = strlen(member);
   node->method_call.method = malloc(len + 1);
   memcpy(node->method_call.method, member, len);
@@ -846,6 +908,24 @@ static Node *parse_method_call_expr(const char *object, const char *member) {
   }
   current_token++;
 
+  return node;
+}
+
+/**
+ * @brief Parses a method call on an arr[i] base (object already parsed)
+ * @param object_expr Index node for the arr[i] base (adopted by the node)
+ * @param member Member name (borrowed, copied into the node)
+ * @return AST node for method call
+ */
+static Node *parse_method_call_expr_idx(Node *object_expr, const char *member) {
+  Node *node = create_node(NODE_METHOD_CALL);
+  node->method_call.object = NULL;
+  node->method_call.object_expr = object_expr;
+  size_t len = strlen(member);
+  node->method_call.method = malloc(len + 1);
+  memcpy(node->method_call.method, member, len);
+  node->method_call.method[len] = '\0';
+  node->method_call.args = parse_call_arguments();
   return node;
 }
 
@@ -990,18 +1070,22 @@ static Node *parse_primary() {
     }
     if (current_token->type != END_OF_TOKENS && current_token->value != NULL &&
         strcmp(current_token->value, ".") == 0) {
-      if (base->type == NODE_MEMBER_ACCESS) {
-        parse_error("Field access cannot be chained\n");
-      }
-      if (base->type != NODE_IDENTIFIER) {
-        parse_error("Only identifiers support member access\n");
+      if (base->type != NODE_IDENTIFIER && base->type != NODE_INDEX &&
+          base->type != NODE_MEMBER_ACCESS) {
+        parse_error("Only variables, arr[i], and field access support member "
+                    "access\n");
       }
       Node *member = parse_member_access(base);
       if (current_token->type != END_OF_TOKENS &&
           current_token->value != NULL &&
           strcmp(current_token->value, "(") == 0) {
-        base = parse_method_call_expr(member->member_access.object,
-                                      member->member_access.member);
+        if (member->member_access.object_expr != NULL) {
+          base = parse_method_call_expr_idx(member->member_access.object_expr,
+                                            member->member_access.member);
+        } else {
+          base = parse_method_call_expr(member->member_access.object,
+                                        member->member_access.member);
+        }
         continue;
       }
       base = member;
@@ -1479,7 +1563,7 @@ static Node *parse_array_decl() {
   current_token++;
 
   if (current_token->type != IDENTIFIER) {
-    parse_error_expected("Expected identifier after array\n");
+    parse_error_expected("Expected identifier after arr\n");
   }
   size_t len = strlen(current_token->value);
   node->array_decl.name = malloc(len + 1);
@@ -1489,52 +1573,14 @@ static Node *parse_array_decl() {
   current_token++;
 
   if (strcmp(current_token->value, "=") != 0) {
-    parse_error_expected("Expected '=' after array name\n");
+    parse_error_expected("Expected '=' after arr name\n");
   }
   current_token++;
 
-  if (strcmp(current_token->value, "[") != 0) {
-    parse_error_expected("Expected '[' for array literal\n");
+  node->array_decl.elements = parse_expression();
+  if (node->array_decl.elements == NULL) {
+    parse_error_expected("Expected array literal or identifier after '='\n");
   }
-  current_token++;
-
-  node->array_decl.elements = create_node(NODE_ARRAY_LITERAL);
-  node->array_decl.elements->array_literal.elements = NULL;
-  Node *tail = NULL;
-
-  if (current_token->type != END_OF_TOKENS &&
-      strcmp(current_token->value, "]") != 0) {
-    while (1) {
-      Node *element = parse_expression();
-      if (element == NULL) {
-        if (current_token->type != END_OF_TOKENS &&
-            current_token->value != NULL &&
-            strcmp(current_token->value, ",") == 0) {
-          current_token++;
-          continue;
-        }
-        break;
-      }
-      if (node->array_decl.elements->array_literal.elements == NULL) {
-        node->array_decl.elements->array_literal.elements = element;
-        tail = element;
-      } else {
-        tail->right = element;
-        tail = element;
-      }
-      if (current_token->type != END_OF_TOKENS &&
-          strcmp(current_token->value, ",") == 0) {
-        current_token++;
-        continue;
-      }
-      break;
-    }
-  }
-
-  if (strcmp(current_token->value, "]") != 0) {
-    parse_error_expected("Expected ']' after array elements\n");
-  }
-  current_token++;
 
   if (strcmp(current_token->value, ";") != 0) {
     parse_error_expected("Expected ';' after array declaration\n");
@@ -1681,10 +1727,16 @@ static Node *clone_node(Node *node) {
     copy->sub_assign.value = clone_node(node->sub_assign.value);
     break;
   case NODE_MEMBER_ACCESS:
-    len = strlen(node->member_access.object);
-    copy->member_access.object = malloc(len + 1);
-    memcpy(copy->member_access.object, node->member_access.object, len);
-    copy->member_access.object[len] = '\0';
+    if (node->member_access.object != NULL) {
+      len = strlen(node->member_access.object);
+      copy->member_access.object = malloc(len + 1);
+      memcpy(copy->member_access.object, node->member_access.object, len);
+      copy->member_access.object[len] = '\0';
+    } else {
+      copy->member_access.object = NULL;
+    }
+    copy->member_access.object_expr =
+        clone_node(node->member_access.object_expr);
     len = strlen(node->member_access.member);
     copy->member_access.member = malloc(len + 1);
     memcpy(copy->member_access.member, node->member_access.member, len);
@@ -1707,6 +1759,14 @@ static Node *clone_node(Node *node) {
     copy->class_def.name = malloc(len + 1);
     memcpy(copy->class_def.name, node->class_def.name, len);
     copy->class_def.name[len] = '\0';
+    if (node->class_def.base != NULL) {
+      len = strlen(node->class_def.base);
+      copy->class_def.base = malloc(len + 1);
+      memcpy(copy->class_def.base, node->class_def.base, len);
+      copy->class_def.base[len] = '\0';
+    } else {
+      copy->class_def.base = NULL;
+    }
     copy->class_def.is_public = node->class_def.is_public;
     copy->class_def.fields = clone_list(node->class_def.fields);
     copy->class_def.methods = clone_list(node->class_def.methods);
@@ -1736,10 +1796,15 @@ static Node *clone_node(Node *node) {
     copy->index.index = clone_node(node->index.index);
     break;
   case NODE_METHOD_CALL:
-    len = strlen(node->method_call.object);
-    copy->method_call.object = malloc(len + 1);
-    memcpy(copy->method_call.object, node->method_call.object, len);
-    copy->method_call.object[len] = '\0';
+    if (node->method_call.object != NULL) {
+      len = strlen(node->method_call.object);
+      copy->method_call.object = malloc(len + 1);
+      memcpy(copy->method_call.object, node->method_call.object, len);
+      copy->method_call.object[len] = '\0';
+    } else {
+      copy->method_call.object = NULL;
+    }
+    copy->method_call.object_expr = clone_node(node->method_call.object_expr);
     len = strlen(node->method_call.method);
     copy->method_call.method = malloc(len + 1);
     memcpy(copy->method_call.method, node->method_call.method, len);
@@ -1747,10 +1812,16 @@ static Node *clone_node(Node *node) {
     copy->method_call.args = clone_list(node->method_call.args);
     break;
   case NODE_MEMBER_ASSIGN:
-    len = strlen(node->member_assign.object);
-    copy->member_assign.object = malloc(len + 1);
-    memcpy(copy->member_assign.object, node->member_assign.object, len);
-    copy->member_assign.object[len] = '\0';
+    if (node->member_assign.object != NULL) {
+      len = strlen(node->member_assign.object);
+      copy->member_assign.object = malloc(len + 1);
+      memcpy(copy->member_assign.object, node->member_assign.object, len);
+      copy->member_assign.object[len] = '\0';
+    } else {
+      copy->member_assign.object = NULL;
+    }
+    copy->member_assign.object_expr =
+        clone_node(node->member_assign.object_expr);
     len = strlen(node->member_assign.member);
     copy->member_assign.member = malloc(len + 1);
     memcpy(copy->member_assign.member, node->member_assign.member, len);
@@ -1760,6 +1831,15 @@ static Node *clone_node(Node *node) {
     memcpy(copy->member_assign.op, node->member_assign.op, len);
     copy->member_assign.op[len] = '\0';
     copy->member_assign.value = clone_node(node->member_assign.value);
+    break;
+  case NODE_INDEX_ASSIGN:
+    copy->index_assign.base = clone_node(node->index_assign.base);
+    copy->index_assign.index = clone_node(node->index_assign.index);
+    len = strlen(node->index_assign.op);
+    copy->index_assign.op = malloc(len + 1);
+    memcpy(copy->index_assign.op, node->index_assign.op, len);
+    copy->index_assign.op[len] = '\0';
+    copy->index_assign.value = clone_node(node->index_assign.value);
     break;
   }
   return copy;
@@ -2189,12 +2269,22 @@ static Node *parse_struct_def() {
   while (current_token->type != END_OF_TOKENS &&
          (current_token->value == NULL ||
           strcmp(current_token->value, "}") != 0)) {
-    if (current_token->type != KEYWORD ||
-        (strcmp(current_token->value, "num") != 0 &&
-         strcmp(current_token->value, "bool") != 0 &&
-         strcmp(current_token->value, "str") != 0)) {
+    if (current_token->type != KEYWORD && current_token->type != IDENTIFIER) {
       parse_error_expected(
-          "Expected field type (num, bool or str) in struct\n");
+          "Expected field type (num, bool, str, or a struct/class name) in "
+          "struct\n");
+    }
+    if (current_token->type == KEYWORD &&
+        strcmp(current_token->value, "num") != 0 &&
+        strcmp(current_token->value, "bool") != 0 &&
+        strcmp(current_token->value, "str") != 0) {
+      parse_error_expected(
+          "Expected field type (num, bool, str, or a struct/class name) in "
+          "struct\n");
+    }
+    if (current_token->type == IDENTIFIER && current_token[1].value != NULL &&
+        strcmp(current_token[1].value, ".") == 0) {
+      parse_error("A field type cannot be a member expression\n");
     }
     Node *field = create_node(NODE_VAR_DECL);
     len = strlen(current_token->value);
@@ -2299,7 +2389,7 @@ static Node *parse_method_def() {
           (strcmp(current_token->value, "num") == 0 ||
            strcmp(current_token->value, "bool") == 0 ||
            strcmp(current_token->value, "str") == 0 ||
-           strcmp(current_token->value, "array") == 0)) {
+           strcmp(current_token->value, "arr") == 0)) {
         param = create_node(NODE_VAR_DECL);
         len = strlen(current_token->value);
         param->var_decl.var_type = malloc(len + 1);
@@ -2426,6 +2516,20 @@ static Node *parse_class_def() {
     warn_missing_visibility("Class", node->class_def.name, def_line, def_col);
   }
   node->class_def.is_public = is_public;
+  node->class_def.base = NULL;
+
+  if (current_token->type == KEYWORD &&
+      strcmp(current_token->value, "inherit") == 0) {
+    current_token++;
+    if (current_token->type != IDENTIFIER) {
+      parse_error_expected("Expected base class name after 'inherit'\n");
+    }
+    len = strlen(current_token->value);
+    node->class_def.base = malloc(len + 1);
+    memcpy(node->class_def.base, current_token->value, len);
+    node->class_def.base[len] = '\0';
+    current_token++;
+  }
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "{") != 0) {
@@ -2446,12 +2550,18 @@ static Node *parse_class_def() {
       parse_error("Visibility modifiers are not allowed on class members, "
                   "methods are always private to the class\n");
     }
-    if (current_token->type != KEYWORD ||
-        (strcmp(current_token->value, "num") != 0 &&
-         strcmp(current_token->value, "bool") != 0 &&
-         strcmp(current_token->value, "str") != 0)) {
+    if (current_token->type != KEYWORD && current_token->type != IDENTIFIER) {
       parse_error_expected(
-          "Expected field or method type (num, bool or str) in class\n");
+          "Expected field or method type (num, bool, str, or a struct/class "
+          "name) in class\n");
+    }
+    if (current_token->type == KEYWORD &&
+        strcmp(current_token->value, "num") != 0 &&
+        strcmp(current_token->value, "bool") != 0 &&
+        strcmp(current_token->value, "str") != 0) {
+      parse_error_expected(
+          "Expected field or method type (num, bool, str, or a struct/class "
+          "name) in class\n");
     }
     if (current_token[1].value == NULL || current_token[1].type != IDENTIFIER) {
       parse_error_expected("Expected field or method name in class\n");
@@ -2624,7 +2734,7 @@ static Node *parse_function() {
           (strcmp(current_token->value, "num") == 0 ||
            strcmp(current_token->value, "bool") == 0 ||
            strcmp(current_token->value, "str") == 0 ||
-           strcmp(current_token->value, "array") == 0)) {
+           strcmp(current_token->value, "arr") == 0)) {
         param = create_node(NODE_VAR_DECL);
         len = strlen(current_token->value);
         param->var_decl.var_type = malloc(len + 1);
@@ -2750,105 +2860,87 @@ static Node *parse_function() {
  * @brief Parses a member statement (method call or field assignment)
  * @return AST node for the statement (current token is the object name)
  */
-static Node *parse_member_statement() {
-  int start_line = current_token->line;
-  int start_col = current_token->col;
-  size_t len = strlen(current_token->value);
-  char *object = malloc(len + 1);
-  memcpy(object, current_token->value, len);
-  object[len] = '\0';
-  current_token++;
-
-  current_token++;
-  if (current_token->type != IDENTIFIER) {
-    free(object);
-    parse_error_expected("Expected member name after '.'\n");
+/**
+ * @brief Parses a member statement from an already parsed postfix base
+ * @param base Parsed base expression (field chain or method call)
+ * @param start_line Statement start line for diagnostics
+ * @param start_col Statement start column for diagnostics
+ * @return AST node for the statement
+ */
+static Node *parse_member_statement_from(Node *base, int start_line,
+                                         int start_col) {
+  if (base == NULL) {
+    return NULL;
   }
-  len = strlen(current_token->value);
-  char *member = malloc(len + 1);
-  memcpy(member, current_token->value, len);
-  member[len] = '\0';
-  current_token++;
-
-  if (current_token->type != END_OF_TOKENS &&
-      strcmp(current_token->value, "(") == 0) {
-    current_token++;
-    Node *args = NULL;
-    Node *tail = NULL;
-    if (current_token->type != END_OF_TOKENS &&
-        strcmp(current_token->value, ")") != 0) {
-      while (1) {
-        Node *arg = parse_expression();
-        if (arg == NULL) {
-          free(object);
-          free(member);
-          return NULL;
-        }
-        if (args == NULL) {
-          args = arg;
-          tail = arg;
-        } else {
-          tail->right = arg;
-          tail = arg;
-        }
-        if (current_token->type != END_OF_TOKENS &&
-            strcmp(current_token->value, ",") == 0) {
-          current_token++;
-          continue;
-        }
-        break;
+  /* arr[i].field / arr[i].field = v: finish the postfix chain first */
+  while (current_token->type != END_OF_TOKENS && current_token->value != NULL &&
+         strcmp(current_token->value, ".") == 0) {
+    if (base->type != NODE_IDENTIFIER && base->type != NODE_INDEX &&
+        base->type != NODE_MEMBER_ACCESS) {
+      parse_error("Only variables, arr[i], and field access support member "
+                  "access\n");
+    }
+    Node *member = parse_member_access(base);
+    if (current_token->type != END_OF_TOKENS && current_token->value != NULL &&
+        strcmp(current_token->value, "(") == 0) {
+      if (member->member_access.object_expr != NULL) {
+        base = parse_method_call_expr_idx(member->member_access.object_expr,
+                                          member->member_access.member);
+      } else {
+        base = parse_method_call_expr(member->member_access.object,
+                                      member->member_access.member);
       }
+      continue;
     }
-    if (current_token->type == END_OF_TOKENS ||
-        strcmp(current_token->value, ")") != 0) {
-      free(object);
-      free(member);
-      parse_error_expected("Expected ')' after method arguments\n");
-    }
-    current_token++;
+    base = member;
+  }
+  if (base->type == NODE_METHOD_CALL) {
     if (current_token->type == END_OF_TOKENS ||
         strcmp(current_token->value, ";") != 0) {
-      free(object);
-      free(member);
       parse_error_expected("Expected ';' after method call\n");
     }
     current_token++;
-    Node *node = create_node(NODE_METHOD_CALL);
-    node->line = start_line;
-    node->col = start_col;
-    node->width = (int)(strlen(object) + 1 + strlen(member));
-    node->method_call.object = object;
-    node->method_call.method = member;
-    node->method_call.args = args;
-    return node;
+    return base;
   }
-
+  if (base->type != NODE_MEMBER_ACCESS) {
+    parse_error("Unexpected member access in statement\n");
+  }
   if (current_token->type == END_OF_TOKENS ||
       (strcmp(current_token->value, "=") != 0 &&
        strcmp(current_token->value, "+=") != 0 &&
        strcmp(current_token->value, "-=") != 0)) {
-    free(object);
-    free(member);
     parse_error("Unexpected member access in statement\n");
   }
   Node *node = create_node(NODE_MEMBER_ASSIGN);
   node->line = start_line;
   node->col = start_col;
-  node->width = (int)(strlen(object) + 1 + strlen(member));
-  len = strlen(current_token->value);
+  node->width = base->width > 0 ? base->width : 1;
+  size_t len = strlen(current_token->value);
   node->member_assign.op = malloc(len + 1);
   memcpy(node->member_assign.op, current_token->value, len);
   node->member_assign.op[len] = '\0';
   current_token++;
-  node->member_assign.object = object;
-  node->member_assign.member = member;
+  node->member_assign.object = base->member_access.object;
+  node->member_assign.member = base->member_access.member;
   node->member_assign.value = parse_expression();
+  node->member_assign.object_expr = base->member_access.object_expr;
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
     parse_error_expected("Expected ';' after assignment\n");
   }
   current_token++;
   return node;
+}
+
+/**
+ * @brief Parses a member statement (method call or field assignment)
+ * @return AST node for the statement (current token is the object name)
+ */
+static Node *parse_member_statement() {
+  int start_line = current_token->line;
+  int start_col = current_token->col;
+  /* Parse the whole postfix chain so a.b.c works */
+  return parse_member_statement_from(parse_primary(), start_line, start_col);
 }
 
 /**
@@ -2910,7 +3002,7 @@ static Node *parse_statement() {
                strcmp(current_token->value, "bool") == 0 ||
                strcmp(current_token->value, "str") == 0) {
       return parse_var_decl();
-    } else if (strcmp(current_token->value, "array") == 0) {
+    } else if (strcmp(current_token->value, "arr") == 0) {
       return parse_array_decl();
     } else if (strcmp(current_token->value, "fn") == 0) {
       return parse_function();
@@ -2947,6 +3039,54 @@ static Node *parse_statement() {
       }
       current_token++;
       return call;
+    } else if (current_token[1].value != NULL &&
+               strcmp(current_token[1].value, "[") == 0) {
+      int node_start_line = current_token->line;
+      int node_start_col = current_token->col;
+      char *nm = malloc(strlen(current_token->value) + 1);
+      strcpy(nm, current_token->value);
+      Node *base = create_node(NODE_IDENTIFIER);
+      base->identifier.name = nm;
+      base->line = current_token->line;
+      base->col = current_token->col;
+      current_token++; // name
+      current_token++; // '['
+      Node *index = parse_expression();
+      if (current_token->type == END_OF_TOKENS ||
+          strcmp(current_token->value, "]") != 0) {
+        parse_error_expected("Expected ']' after index\n");
+      }
+      current_token++; // ']'
+      Node *idx = create_node(NODE_INDEX);
+      idx->index.base = base;
+      idx->index.index = index;
+      /* a[i].field / a[i].method() statements reuse the member parser */
+      if (current_token->type != END_OF_TOKENS &&
+          strcmp(current_token->value, ".") == 0) {
+        return parse_member_statement_from(idx, node_start_line,
+                                           node_start_col);
+      }
+      if (current_token->type == END_OF_TOKENS ||
+          (strcmp(current_token->value, "=") != 0 &&
+           strcmp(current_token->value, "+=") != 0 &&
+           strcmp(current_token->value, "-=") != 0)) {
+        parse_error_expected("Expected '=', '+=', or '-=' after index\n");
+      }
+      Node *node = create_node(NODE_INDEX_ASSIGN);
+      size_t ol = strlen(current_token->value);
+      node->index_assign.op = malloc(ol + 1);
+      memcpy(node->index_assign.op, current_token->value, ol);
+      node->index_assign.op[ol] = '\0';
+      current_token++;
+      node->index_assign.base = base;
+      node->index_assign.index = index;
+      node->index_assign.value = parse_expression();
+      if (current_token->type == END_OF_TOKENS ||
+          strcmp(current_token->value, ";") != 0) {
+        parse_error_expected("Expected ';' after index assignment\n");
+      }
+      current_token++;
+      return node;
     } else if (current_token[1].value != NULL &&
                (strcmp(current_token[1].value, "=") == 0 ||
                 strcmp(current_token[1].value, "+=") == 0 ||
@@ -3023,54 +3163,52 @@ Node *Parser(Token *tokens, const char *filename) {
   }
 
   if (import_depth == 1) {
-    for (Node *s = program_head; s != NULL; s = s->right) {
-      Node *calls[1024];
-      int call_count = 0;
-      collect_calls(s, calls, &call_count, 1024);
-      for (int k = 0; k < call_count; k++) {
-        if (strcmp(calls[k]->func_call.name, "input") == 0 ||
-            strcmp(calls[k]->func_call.name, "len") == 0 ||
-            strcmp(calls[k]->func_call.name, "toStr") == 0 ||
-            strcmp(calls[k]->func_call.name, "toNum") == 0 ||
-            strcmp(calls[k]->func_call.name, "readFile") == 0 ||
-            strcmp(calls[k]->func_call.name, "writeFile") == 0) {
-          continue;
-        }
-        Node *def = find_function_in(program_head, calls[k]->func_call.name);
-        if (def == NULL) {
-          Node *owner =
-              find_method_owner(program_head, calls[k]->func_call.name);
-          if (owner != NULL) {
-            char message[128];
-            snprintf(message, sizeof(message),
-                     "Method '%s' is private to class '%s', call it as "
-                     "instance.%s(...)",
-                     calls[k]->func_call.name, owner->class_def.name,
-                     calls[k]->func_call.name);
-            parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width,
-                           message);
-          }
-          char message[96];
-          snprintf(message, sizeof(message), "Function '%s' is not defined",
+    Node *calls[1024];
+    int call_count = 0;
+    /* collect_calls follows statement links, so walk the list once. */
+    collect_calls(program_head, calls, &call_count, 1024);
+    for (int k = 0; k < call_count; k++) {
+      if (strcmp(calls[k]->func_call.name, "input") == 0 ||
+          strcmp(calls[k]->func_call.name, "len") == 0 ||
+          strcmp(calls[k]->func_call.name, "toStr") == 0 ||
+          strcmp(calls[k]->func_call.name, "toNum") == 0 ||
+          strcmp(calls[k]->func_call.name, "readFile") == 0 ||
+          strcmp(calls[k]->func_call.name, "writeFile") == 0) {
+        continue;
+      }
+      Node *def = find_function_in(program_head, calls[k]->func_call.name);
+      if (def == NULL) {
+        Node *owner = find_method_owner(program_head, calls[k]->func_call.name);
+        if (owner != NULL) {
+          char message[128];
+          snprintf(message, sizeof(message),
+                   "Method '%s' is private to class '%s', call it as "
+                   "instance.%s(...)",
+                   calls[k]->func_call.name, owner->class_def.name,
                    calls[k]->func_call.name);
           parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width,
                          message);
+          continue;
         }
-        int want = 0;
-        for (Node *p = def->function.params; p != NULL; p = p->right) {
-          want++;
-        }
-        int got = 0;
-        for (Node *a = calls[k]->func_call.args; a != NULL; a = a->right) {
-          got++;
-        }
-        if (want != got) {
-          char message[96];
-          snprintf(message, sizeof(message), "Expected %d arguments, got %d",
-                   want, got);
-          parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width,
-                         message);
-        }
+        char message[96];
+        snprintf(message, sizeof(message), "Function '%s' is not defined",
+                 calls[k]->func_call.name);
+        parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width, message);
+        continue;
+      }
+      int want = 0;
+      for (Node *p = def->function.params; p != NULL; p = p->right) {
+        want++;
+      }
+      int got = 0;
+      for (Node *a = calls[k]->func_call.args; a != NULL; a = a->right) {
+        got++;
+      }
+      if (want != got) {
+        char message[96];
+        snprintf(message, sizeof(message), "Expected %d arguments, got %d",
+                 want, got);
+        parse_error_at(calls[k]->line, calls[k]->col, calls[k]->width, message);
       }
     }
   }
@@ -3189,8 +3327,13 @@ void print_tree(Node *root) {
     printf(")");
     break;
   case NODE_MEMBER_ACCESS:
-    printf("Member(%s.%s)", root->member_access.object,
-           root->member_access.member);
+    printf("Member(");
+    if (root->member_access.object != NULL) {
+      printf("%s", root->member_access.object);
+    } else {
+      print_tree(root->member_access.object_expr);
+    }
+    printf(".%s)", root->member_access.member);
     break;
   case NODE_BREAK:
     printf("Break");
@@ -3209,9 +3352,12 @@ void print_tree(Node *root) {
     printf(")");
     break;
   case NODE_CLASS_DEF:
-    printf("Class(%s %s, fields: ",
-           root->class_def.is_public ? "public" : "private",
+    printf("Class(%s %s", root->class_def.is_public ? "public" : "private",
            root->class_def.name);
+    if (root->class_def.base != NULL) {
+      printf(" inherit %s", root->class_def.base);
+    }
+    printf(", fields: ");
     print_tree(root->class_def.fields);
     printf(", methods: ");
     print_tree(root->class_def.methods);
@@ -3238,15 +3384,34 @@ void print_tree(Node *root) {
     printf(")");
     break;
   case NODE_METHOD_CALL:
-    printf("MethodCall(%s.%s, args: ", root->method_call.object,
-           root->method_call.method);
+    printf("MethodCall(");
+    if (root->method_call.object != NULL) {
+      printf("%s", root->method_call.object);
+    } else {
+      print_tree(root->method_call.object_expr);
+    }
+    printf(".%s, args: ", root->method_call.method);
     print_tree(root->method_call.args);
     printf(")");
     break;
   case NODE_MEMBER_ASSIGN:
-    printf("MemberAssign(%s.%s %s ", root->member_assign.object,
-           root->member_assign.member, root->member_assign.op);
+    printf("MemberAssign(");
+    if (root->member_assign.object != NULL) {
+      printf("%s", root->member_assign.object);
+    } else {
+      print_tree(root->member_assign.object_expr);
+    }
+    printf(".%s %s ", root->member_assign.member, root->member_assign.op);
     print_tree(root->member_assign.value);
+    printf(")");
+    break;
+  case NODE_INDEX_ASSIGN:
+    printf("IndexAssign(");
+    print_tree(root->index_assign.base);
+    printf("[");
+    print_tree(root->index_assign.index);
+    printf("] %s ", root->index_assign.op);
+    print_tree(root->index_assign.value);
     printf(")");
     break;
   default:

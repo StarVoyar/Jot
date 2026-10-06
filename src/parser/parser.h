@@ -41,7 +41,8 @@ typedef enum {
   NODE_MEMBER_ASSIGN,  /**< Member assignment (object.member = value) */
   NODE_BREAK,          /**< break (inside a loop) */
   NODE_CONTINUE,       /**< continue (inside a loop) */
-  NODE_NULL            /**< null literal (no reference) */
+  NODE_NULL,           /**< null literal (no reference) */
+  NODE_INDEX_ASSIGN,   /**< Index a[i] = value / += / -= */
 } NodeType;
 
 /**
@@ -129,8 +130,9 @@ typedef struct Node {
       struct Node *value; /**< Value to add/subtract */
     } sub_assign;
     struct {
-      char *object; /**< Object name */
+      char *object; /**< Object name (NULL when object_expr is set) */
       char *member; /**< Member name */
+      struct Node *object_expr; /**< arr[i] base (NULL for plain identifiers) */
     } member_access;
     struct {
       char *name;          /**< Struct name */
@@ -139,6 +141,7 @@ typedef struct Node {
     } struct_def;
     struct {
       char *name;           /**< Class name */
+      char *base;           /**< Base class name after 'inherit', or NULL */
       int is_public;        /**< Non-zero if declared public (importable) */
       struct Node *fields;  /**< Field declarations (VAR_DECL, no values) */
       struct Node *methods; /**< Method definitions (METHOD_DEF nodes) */
@@ -159,15 +162,25 @@ typedef struct Node {
       struct Node *index; /**< Index expression (must be a number) */
     } index;
     struct {
-      char *object;      /**< Instance name (or "self" inside methods) */
+      char *object;      /**< Instance name (or "self" inside methods,
+                              NULL when object_expr is set) */
       char *method;      /**< Method name */
       struct Node *args; /**< Call arguments (linked via right, NULL if none) */
+      struct Node *object_expr; /**< arr[i] base (NULL for plain identifiers) */
     } method_call;
     struct {
-      char *object;       /**< Instance name (or "self" inside methods) */
-      char *member;       /**< Field name */
-      char *op;           /**< Assignment operator ("=", "+=", "-=") */
+      struct Node *base;  /**< Array variable (identifier base) */
+      struct Node *index; /**< Index expression */
+      char *op;           /**< "=", "+=", or "-=" */
       struct Node *value; /**< Assigned value */
+    } index_assign;
+    struct {
+      char *object;             /**< Instance name (or "self" inside methods,
+                                     NULL when object_expr is set) */
+      char *member;             /**< Field name */
+      char *op;                 /**< Assignment operator ("=", "+=", "-=") */
+      struct Node *value;       /**< Assigned value */
+      struct Node *object_expr; /**< arr[i] base (NULL for plain identifiers) */
     } member_assign;
   };
 } Node;

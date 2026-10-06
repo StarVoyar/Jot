@@ -1,0 +1,26 @@
+struct private point {
+  num x;
+  num y;
+}
+
+fn public main() {
+  point a = new point(1, 2);
+  point b = new point(3, 4);
+  arr pts = [a, b];
+  print(pts[0].x);
+  print("\n");
+  pts[1].y += 10;
+  print(pts[1].y);
+  print("\n");
+  print(a.x);
+  print("\n");
+  for (p in pts) {
+    print(p.x);
+    print(",");
+    print(p.y);
+    print("\n");
+  }
+  return(0);
+}
+
+main();

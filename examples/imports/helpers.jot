@@ -1,0 +1,13 @@
+fn public add(num a, num b) {
+  return(self.a + self.b);
+}
+
+fn public greet(str name) {
+  print("hello " + self.name);
+  print("\n");
+  return(0);
+}
+
+struct public counter {
+  num n;
+}

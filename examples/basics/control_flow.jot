@@ -10,7 +10,7 @@ fn public main() {
     print("\n");
     x = x - 1;
   }
-  array nums = [10, 20, 30];
+  arr nums = [10, 20, 30];
   for (n in nums) {
     print(n);
     print("\n");

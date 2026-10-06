@@ -1,0 +1,67 @@
+class public animal {
+  str name;
+
+  str speak() {
+    return("generic sound");
+  }
+
+  str tag() {
+    return(self.name);
+  }
+}
+
+class public dog inherit animal {
+  str sound;
+
+  str speak() {
+    return(self.name + " barks");
+  }
+}
+
+class public cat inherit animal {
+  num lives;
+
+  str speak() {
+    return(self.name + " meows");
+  }
+}
+
+fn public main() {
+  animal a = new animal("Beast");
+  print(a.speak());
+  print("\n");
+
+  dog d = new dog("Rex", "woof");
+  print(d.speak());
+  print("\n");
+  print(d.tag());
+  print("\n");
+  print(d.sound);
+  print("\n");
+
+  animal up = new dog("Up", "x");
+  print(up.speak());
+  print("\n");
+  print(up.tag());
+  print("\n");
+
+  cat c = new cat("Mia", 9);
+  animal any = c;
+  print(any.speak());
+  print("\n");
+
+  arr zoo = [d, d];
+  for (x in zoo) {
+    print(x.speak());
+    print("\n");
+  }
+
+  dog copy = d;
+  print(copy.speak());
+  print("\n");
+  print(d.name);
+  print("\n");
+  return(0);
+}
+
+main();
