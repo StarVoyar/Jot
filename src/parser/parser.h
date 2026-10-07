@@ -58,8 +58,10 @@ typedef struct Node {
   const char *source; /**< File this node came from (borrowed, for imports) */
   union {
     struct {
-      char *name;    /**< Function name */
-      int is_public; /**< Non-zero if declared public (importable) */
+      char *name;        /**< Function name */
+      int is_public;     /**< Non-zero if declared public (importable) */
+      char *return_type; /**< Return type: "num", "str", "arr", "char", or
+                            "void" */
       struct Node
           *params; /**< Function parameters (linked via right, NULL if none) */
       struct Node *body; /**< Function body (linked via right, NULL if empty) */
@@ -67,6 +69,7 @@ typedef struct Node {
     struct {
       char *var_type;     /**< Variable type (num, bool, string, char) */
       char *name;         /**< Variable name */
+      int is_global;      /**< Non-zero if declared with 'global' keyword */
       struct Node *value; /**< Initial value (optional) */
     } var_decl;
     struct {

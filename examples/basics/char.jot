@@ -1,6 +1,13 @@
 fn public main() {
-  char c = 65;
+  char c = 'A';
   print(c);
   print("\n");
+  if (c == 65) {
+    print("same");
+    print("\n");
+  }
+  char tab = '\t';
+  print(tab);
+  print("done\n");
 }
 main();

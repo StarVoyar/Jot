@@ -135,6 +135,13 @@ static int frame_size;
 /** Non-zero while generating a function body (returns use ret) */
 static int in_function;
 
+/** Declared return type of the enclosing function ("void" enables bare return)
+ */
+static const char *cur_return_type;
+
+/** Sig index of the enclosing function, -1 outside functions */
+static int cur_sig_idx;
+
 /** Non-zero if the program defines fn main (it lives at jot_main) */
 static int has_user_main;
 
@@ -152,6 +159,26 @@ static int sig_param_float[256][32];
 
 /** Non-zero if function returns only comparisons (bool), never floats */
 static int sig_is_bool_only[256];
+
+/** Declared return type of defined functions ("num","str","arr","char" or NULL)
+ */
+static char *sig_return_type[256];
+
+/** Non-zero if function returns a float (callers must type the call as float)
+ */
+static int sig_return_float[256];
+
+/** Names of global variables (data-section storage, accessible everywhere) */
+static char *global_names[256];
+
+/** Types of global variables, parallel to global_names */
+static ValueType global_types[256];
+
+/** Initial value strings of global variables (NULL = zero-init) */
+static char *global_init[256];
+
+/** Number of recorded globals */
+static int global_count;
 
 /** Struct definitions for this program */
 static StructDef struct_defs[MAX_STRUCTS];
@@ -192,6 +219,9 @@ static void gen_expression(Node *node);
 /** Forward declaration for statement generation */
 static void gen_statement(Node *node);
 
+/** Forward declaration: side-effect classification used by call/assign opts */
+static int expr_is_regsafe(Node *node);
+
 /** Forward declaration for block generation */
 static void gen_block(Node *list);
 
@@ -204,10 +234,10 @@ static void check_call_arg(Node *arg, ValueType want, const char *want_kind);
 /** Forward declaration for method calls (result left in rax) */
 static void gen_method_call(Node *node);
 
-/** Forward declaration for the toStr builtin (heap string in rax) */
+/** Forward declaration for the tostr builtin (heap string in rax) */
 static void gen_to_str(Node *node);
 
-/** Forward declaration for the toNum builtin (double bits in rax) */
+/** Forward declaration for the tonum builtin (double bits in rax) */
 static void gen_to_num(Node *node);
 
 /** Forward declaration for the readFile builtin (heap string in rax) */
@@ -332,6 +362,20 @@ static int find_var(const char *name) {
 }
 
 /**
+ * @brief Finds a global variable by name
+ * @param name Variable name to look up
+ * @return Global index, or -1 if not found
+ */
+static int find_global(const char *name) {
+  for (int i = 0; i < global_count; i++) {
+    if (strcmp(global_names[i], name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * @brief Finds an array in the current frame
  * @param name Array name to look up
  * @return Slot index, or -1 if not found
@@ -380,6 +424,10 @@ static int add_var(Node *node, const char *name, ValueType type, int is_param) {
 static int require_var(Node *node, const char *name) {
   int slot = find_var(name);
   if (slot < 0) {
+    int g = find_global(name);
+    if (g >= 0) {
+      return -(g + 2); /* globals encode as -(index+2), -1 = not found */
+    }
     codegen_error(node, "Variable '%s' not declared", name);
   }
   if (var_is_param[slot] && !no_param_warn && var_types[slot] != TYPE_ARRAY) {
@@ -388,6 +436,133 @@ static int require_var(Node *node, const char *name) {
   }
   var_used[slot] = 1;
   return slot;
+}
+
+/**
+ * @brief Returns non-zero if a slot from require_var is a global reference
+ * @param slot Slot value from require_var
+ */
+static int slot_is_global(int slot) { return slot < -1; }
+
+/**
+ * @brief Converts a global-encoded slot to a global index
+ * @param slot Slot value from require_var (negative)
+ */
+static int slot_to_global(int slot) { return (-slot) - 2; }
+
+/**
+ * @brief Non-zero if the node is a side-effect-free leaf usable in rbx
+ * @details Literals and variable reads never call runtime functions, so they
+ *          can be evaluated directly into rbx after the left operand is in
+ *          rax, avoiding the push/pop round trip of the generic path.
+ * @param node Expression node to classify
+ */
+static int is_leaf_expr(Node *node) {
+  return node != NULL &&
+         (node->type == NODE_INT_LITERAL || node->type == NODE_FLOAT_LITERAL ||
+          node->type == NODE_IDENTIFIER);
+}
+
+/**
+ * @brief Emits a leaf expression into rbx without clobbering rax
+ * @details Runs the same diagnostics as the generic path (undeclared name,
+ *          parameter warnings, unused tracking) via require_var.
+ * @param node Literal or identifier node to emit
+ */
+static void gen_leaf_into_rbx(Node *node) {
+  if (node->type == NODE_IDENTIFIER) {
+    int slot = require_var(node, node->identifier.name);
+    if (slot_is_global(slot)) {
+      fprintf(out, "  mov rbx, [rel global_%s]\n", node->identifier.name);
+    } else {
+      fprintf(out, "  mov rbx, [rbp - %d]\n", (slot + 1) * 8);
+    }
+  } else if (node->type == NODE_INT_LITERAL) {
+    fprintf(out, "  mov rbx, %lld\n", node->int_literal.value);
+  } else {
+    unsigned long long float_bits;
+    memcpy(&float_bits, &node->float_literal.value, sizeof(double));
+    fprintf(out, "  mov rbx, 0x%llx\n", float_bits);
+  }
+}
+
+/**
+ * @brief Emits `target = target op expr` as a memory-destination operation
+ * @details Matches `v = v + expr`, `v = v - expr`, `v = v * expr` for int
+ *          targets and emits `op [addr], rax`, skipping the load and store.
+ *          Operand validation must already have run. For globals the right
+ *          side must be call-free (a callee could modify the global between
+ *          the load and the store in the generic path order).
+ * @param target_name Assignment target identifier
+ * @param value Value node of the assignment
+ * @param addr Already-formatted address operand (e.g. "[rbp - 8]")
+ * @param right_must_be_safe Non-zero to reject calls in the right side
+ * @return Non-zero if the pattern matched and was emitted
+ */
+static int try_assign_rmw(const char *target_name, Node *value,
+                          const char *addr, int right_must_be_safe) {
+  if (value == NULL || value->type != NODE_BINARY_OP) {
+    return 0;
+  }
+  const char *op = value->binary_op.op;
+  if (strcmp(op, "+") != 0 && strcmp(op, "-") != 0 && strcmp(op, "*") != 0) {
+    return 0;
+  }
+  Node *lhs = value->binary_op.left;
+  if (lhs->type != NODE_IDENTIFIER ||
+      strcmp(lhs->identifier.name, target_name) != 0) {
+    return 0;
+  }
+  if (right_must_be_safe && !expr_is_regsafe(value->binary_op.right)) {
+    return 0;
+  }
+  Node *rhs = value->binary_op.right;
+  int rhs_imm32 = 0;
+  if (rhs->type == NODE_INT_LITERAL) {
+    long long rv = rhs->int_literal.value;
+    if (rv >= -2147483647LL - 1 && rv <= 2147483647LL) {
+      rhs_imm32 = 1;
+    }
+  }
+  if (!rhs_imm32) {
+    gen_expression(rhs);
+  }
+  if (strcmp(op, "+") == 0) {
+    if (rhs_imm32) {
+      fprintf(out, "  add qword %s, %lld\n", addr, rhs->int_literal.value);
+    } else {
+      fprintf(out, "  add qword %s, rax\n", addr);
+    }
+  } else if (strcmp(op, "-") == 0) {
+    if (rhs_imm32) {
+      fprintf(out, "  sub qword %s, %lld\n", addr, rhs->int_literal.value);
+    } else {
+      fprintf(out, "  sub qword %s, rax\n", addr);
+    }
+  } else if (rhs_imm32) {
+    fprintf(out, "  imul qword %s, %lld\n", addr, rhs->int_literal.value);
+  } else {
+    fprintf(out, "  imul qword %s, rax\n", addr);
+  }
+  fprintf(out, "  jo overflow_trap\n");
+  return 1;
+}
+
+/**
+ * @brief Emits the right operand into rbx with the left operand in rax
+ * @details Leaf operands (literals/variables) load straight into rbx;
+ *          anything else preserves rax with a push/pop around evaluation.
+ * @param right Right-hand operand node
+ */
+static void gen_right_operand_rbx(Node *right) {
+  if (is_leaf_expr(right)) {
+    gen_leaf_into_rbx(right);
+  } else {
+    fprintf(out, "  push rax\n");
+    gen_expression(right);
+    fprintf(out, "  mov rbx, rax\n");
+    fprintf(out, "  pop rax\n");
+  }
 }
 
 /**
@@ -676,6 +851,9 @@ static ValueType resolve_decl_type(const char *keyword, Node *node,
   if (strcmp(keyword, "num") == 0) {
     return TYPE_INT;
   }
+  if (strcmp(keyword, "char") == 0) {
+    return TYPE_INT;
+  }
   int s = find_struct(keyword);
   if (s >= 0) {
     if (out_kind != NULL) {
@@ -837,19 +1015,23 @@ static ValueType peek_type(Node *node) {
     return TYPE_NULL;
   case NODE_IDENTIFIER: {
     int slot = find_var(node->identifier.name);
-    if (slot < 0) {
-      return TYPE_INT;
+    if (slot >= 0) {
+      return var_types[slot];
     }
-    return var_types[slot];
+    int g = find_global(node->identifier.name);
+    if (g >= 0) {
+      return global_types[g];
+    }
+    return TYPE_INT;
   }
   case NODE_FUNC_CALL: {
     if (strcmp(node->func_call.name, "input") == 0) {
       return TYPE_INT;
     }
-    if (strcmp(node->func_call.name, "toStr") == 0) {
+    if (strcmp(node->func_call.name, "tostr") == 0) {
       return TYPE_STRING;
     }
-    if (strcmp(node->func_call.name, "toNum") == 0) {
+    if (strcmp(node->func_call.name, "tonum") == 0) {
       return TYPE_FLOAT;
     }
     if (strcmp(node->func_call.name, "readFile") == 0) {
@@ -857,6 +1039,20 @@ static ValueType peek_type(Node *node) {
     }
     for (int s = 0; s < sig_count; s++) {
       if (strcmp(sig_names[s], node->func_call.name) == 0) {
+        if (sig_return_type[s] != NULL) {
+          if (strcmp(sig_return_type[s], "str") == 0) {
+            return TYPE_STRING;
+          }
+          if (strcmp(sig_return_type[s], "arr") == 0) {
+            return TYPE_ARRAY;
+          }
+          if (strcmp(sig_return_type[s], "void") == 0) {
+            return TYPE_NULL;
+          }
+        }
+        if (sig_return_float[s]) {
+          return TYPE_FLOAT;
+        }
         if (sig_is_bool_only[s]) {
           return TYPE_INT;
         }
@@ -1020,16 +1216,19 @@ static ValueType expr_type(Node *node) {
     return TYPE_NULL;
   case NODE_IDENTIFIER: {
     int slot = require_var(node, node->identifier.name);
+    if (slot_is_global(slot)) {
+      return global_types[slot_to_global(slot)];
+    }
     return var_types[slot];
   }
   case NODE_FUNC_CALL: {
     if (strcmp(node->func_call.name, "input") == 0) {
       return TYPE_INT;
     }
-    if (strcmp(node->func_call.name, "toStr") == 0) {
+    if (strcmp(node->func_call.name, "tostr") == 0) {
       return TYPE_STRING;
     }
-    if (strcmp(node->func_call.name, "toNum") == 0) {
+    if (strcmp(node->func_call.name, "tonum") == 0) {
       return TYPE_FLOAT;
     }
     if (strcmp(node->func_call.name, "readFile") == 0) {
@@ -1037,6 +1236,21 @@ static ValueType expr_type(Node *node) {
     }
     for (int s = 0; s < sig_count; s++) {
       if (strcmp(sig_names[s], node->func_call.name) == 0) {
+        if (sig_return_type[s] != NULL) {
+          if (strcmp(sig_return_type[s], "str") == 0) {
+            return TYPE_STRING;
+          }
+          if (strcmp(sig_return_type[s], "arr") == 0) {
+            return TYPE_ARRAY;
+          }
+          if (strcmp(sig_return_type[s], "void") == 0) {
+            codegen_error(node, "Cannot use result of void function '%s'",
+                          node->func_call.name);
+          }
+        }
+        if (sig_return_float[s]) {
+          return TYPE_FLOAT;
+        }
         if (sig_is_bool_only[s]) {
           return TYPE_INT;
         }
@@ -1205,6 +1419,316 @@ static int is_comparison_op(const char *op) {
   return strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
          strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
          strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0;
+}
+
+/* ---- Float-return detection (mirrors runtime promotion rules) ---- */
+
+/** Scan-time value state: int-ish, float, or string */
+#define RF_INT 0
+#define RF_FLOAT 1
+#define RF_STR 2
+
+typedef struct {
+  char name[64];
+  int state;
+} RFVar;
+
+typedef struct {
+  RFVar vars[128];
+  int nvars;
+  RFVar arrays[64];
+  int narrays;
+  Node *params;
+  int sig;
+  int saw_float;
+} RFCtx;
+
+static int rf_expr_state(Node *node, RFCtx *ctx);
+
+static int rf_get_state(RFCtx *ctx, const char *name) {
+  for (int i = ctx->nvars - 1; i >= 0; i--) {
+    if (strcmp(ctx->vars[i].name, name) == 0) {
+      return ctx->vars[i].state;
+    }
+  }
+  int idx = 0;
+  for (Node *p = ctx->params; p != NULL; p = p->right, idx++) {
+    const char *pn =
+        p->type == NODE_VAR_DECL ? p->var_decl.name : p->identifier.name;
+    if (strcmp(pn, name) == 0) {
+      if (ctx->sig >= 0 && idx < 32 && sig_param_float[ctx->sig][idx]) {
+        return RF_FLOAT;
+      }
+      return RF_INT;
+    }
+  }
+  int g = find_global(name);
+  if (g >= 0) {
+    if (global_types[g] == TYPE_FLOAT)
+      return RF_FLOAT;
+    if (global_types[g] == TYPE_STRING)
+      return RF_STR;
+    return RF_INT;
+  }
+  return RF_INT;
+}
+
+static void rf_update_var(RFCtx *ctx, const char *name, int st, int exact) {
+  int old = rf_get_state(ctx, name);
+  int merged = exact ? st : (old > st ? old : st);
+  for (int i = ctx->nvars - 1; i >= 0; i--) {
+    if (strcmp(ctx->vars[i].name, name) == 0) {
+      ctx->vars[i].state = merged;
+      return;
+    }
+  }
+  if (ctx->nvars >= 128)
+    return;
+  snprintf(ctx->vars[ctx->nvars].name, sizeof(ctx->vars[0].name), "%s", name);
+  ctx->vars[ctx->nvars].state = merged;
+  ctx->nvars++;
+}
+
+static int rf_array_state(RFCtx *ctx, const char *name) {
+  for (int i = ctx->narrays - 1; i >= 0; i--) {
+    if (strcmp(ctx->arrays[i].name, name) == 0) {
+      return ctx->arrays[i].state;
+    }
+  }
+  return RF_INT;
+}
+
+static void rf_set_array(RFCtx *ctx, const char *name, int st) {
+  for (int i = ctx->narrays - 1; i >= 0; i--) {
+    if (strcmp(ctx->arrays[i].name, name) == 0) {
+      ctx->arrays[i].state = st;
+      return;
+    }
+  }
+  if (ctx->narrays >= 64)
+    return;
+  snprintf(ctx->arrays[ctx->narrays].name, sizeof(ctx->arrays[0].name), "%s",
+           name);
+  ctx->arrays[ctx->narrays].state = st;
+  ctx->narrays++;
+}
+
+/**
+ * @brief Infers the scan-time float/string state of an expression
+ * @param node Expression to inspect
+ * @param ctx Function context (vars, params, arrays)
+ * @return RF_INT, RF_FLOAT or RF_STR
+ */
+static int rf_expr_state(Node *node, RFCtx *ctx) {
+  if (node == NULL) {
+    return RF_INT;
+  }
+  switch (node->type) {
+  case NODE_FLOAT_LITERAL:
+    return RF_FLOAT;
+  case NODE_STRING_LITERAL:
+    return RF_STR;
+  case NODE_INT_LITERAL:
+  case NODE_NULL:
+    return RF_INT;
+  case NODE_IDENTIFIER:
+    return rf_get_state(ctx, node->identifier.name);
+  case NODE_BINARY_OP: {
+    const char *op = node->binary_op.op;
+    if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+        strcmp(op, "<") == 0 || strcmp(op, ">") == 0 || strcmp(op, "<=") == 0 ||
+        strcmp(op, ">=") == 0) {
+      return RF_INT;
+    }
+    int l = rf_expr_state(node->binary_op.left, ctx);
+    int r = rf_expr_state(node->binary_op.right, ctx);
+    if (strcmp(op, "+") == 0 && (l == RF_STR || r == RF_STR)) {
+      return RF_STR;
+    }
+    if (l == RF_FLOAT || r == RF_FLOAT) {
+      return RF_FLOAT;
+    }
+    return RF_INT;
+  }
+  case NODE_FUNC_CALL: {
+    const char *nm = node->func_call.name;
+    if (strcmp(nm, "tonum") == 0)
+      return RF_FLOAT;
+    if (strcmp(nm, "tostr") == 0 || strcmp(nm, "readFile") == 0) {
+      return RF_STR;
+    }
+    if (strcmp(nm, "input") == 0)
+      return RF_INT;
+    for (int s = 0; s < sig_count; s++) {
+      if (strcmp(sig_names[s], nm) == 0) {
+        if (sig_return_type[s] != NULL) {
+          if (strcmp(sig_return_type[s], "str") == 0)
+            return RF_STR;
+          if (strcmp(sig_return_type[s], "void") == 0)
+            return RF_INT;
+        }
+        if (sig_return_float[s])
+          return RF_FLOAT;
+        for (int j = 0; j < 32; j++) {
+          if (sig_param_float[s][j])
+            return RF_FLOAT;
+        }
+        return RF_INT;
+      }
+    }
+    return RF_INT;
+  }
+  case NODE_METHOD_CALL: {
+    /* Unresolvable at scan time: class methods normalize num to float,
+       but the object's class is not known here, so stay conservative. */
+    return RF_INT;
+  }
+  case NODE_INDEX: {
+    if (node->index.base != NULL && node->index.base->type == NODE_IDENTIFIER) {
+      return rf_array_state(ctx, node->index.base->identifier.name);
+    }
+    return RF_INT;
+  }
+  case NODE_ARRAY_LITERAL: {
+    int st = RF_INT;
+    for (Node *e = node->array_literal.elements; e != NULL; e = e->right) {
+      int es = rf_expr_state(e, ctx);
+      if (es > st)
+        st = es;
+    }
+    return st;
+  }
+  case NODE_MEMBER_ACCESS:
+  case NODE_NEW:
+    return RF_INT;
+  default:
+    return RF_INT;
+  }
+}
+
+/**
+ * @brief Walks statements, tracking float flow into returns
+ * @param list Statement list (follows right chain, recurses into blocks)
+ * @param ctx Function context, sees_float set when a float return is found
+ */
+static void rf_walk(Node *list, RFCtx *ctx) {
+  for (Node *s = list; s != NULL; s = s->right) {
+    switch (s->type) {
+    case NODE_VAR_DECL: {
+      int st = RF_INT;
+      if (s->var_decl.var_type != NULL &&
+          strcmp(s->var_decl.var_type, "str") == 0) {
+        st = RF_STR;
+      } else if (s->var_decl.value != NULL) {
+        st = rf_expr_state(s->var_decl.value, ctx);
+      }
+      rf_update_var(ctx, s->var_decl.name, st, 1);
+      break;
+    }
+    case NODE_ARRAY_DECL: {
+      int st = RF_INT;
+      Node *rhs = s->array_decl.elements;
+      if (rhs != NULL && rhs->type == NODE_IDENTIFIER) {
+        st = rf_array_state(ctx, rhs->identifier.name);
+      } else if (rhs != NULL && rhs->type == NODE_ARRAY_LITERAL) {
+        for (Node *e = rhs->array_literal.elements; e != NULL; e = e->right) {
+          int es = rf_expr_state(e, ctx);
+          if (es > st)
+            st = es;
+        }
+      }
+      rf_set_array(ctx, s->array_decl.name, st);
+      rf_update_var(ctx, s->array_decl.name, RF_INT, 1);
+      break;
+    }
+    case NODE_ASSIGNMENT: {
+      int st = rf_expr_state(s->assignment.value, ctx);
+      rf_update_var(ctx, s->assignment.name, st, 0);
+      break;
+    }
+    case NODE_ADD_ASSIGN:
+    case NODE_SUB_ASSIGN: {
+      const char *nm =
+          s->type == NODE_ADD_ASSIGN ? s->add_assign.name : s->sub_assign.name;
+      Node *val = s->type == NODE_ADD_ASSIGN ? s->add_assign.value
+                                             : s->sub_assign.value;
+      int st = rf_expr_state(val, ctx);
+      rf_update_var(ctx, nm, st, 0);
+      break;
+    }
+    case NODE_RETURN: {
+      if (s->return_stmt.value != NULL &&
+          rf_expr_state(s->return_stmt.value, ctx) == RF_FLOAT) {
+        ctx->saw_float = 1;
+      }
+      break;
+    }
+    case NODE_IF:
+      rf_walk(s->if_stmt.body, ctx);
+      rf_walk(s->if_stmt.else_body, ctx);
+      break;
+    case NODE_WHILE:
+      rf_walk(s->while_stmt.body, ctx);
+      break;
+    case NODE_FOR: {
+      rf_update_var(ctx, s->for_stmt.var_name,
+                    rf_array_state(ctx, s->for_stmt.array_name), 1);
+      rf_walk(s->for_stmt.body, ctx);
+      break;
+    }
+    default:
+      break;
+    }
+  }
+}
+
+/**
+ * @brief Marks functions whose returns yield floats (callers type them float)
+ * @param root Root statement list
+ * @details Monotone: existing flags are kept, so it can be re-run as the
+ * param float scan refines parameters that flow into returns
+ */
+static void scan_return_floats(Node *root) {
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type != NODE_FUNCTION) {
+      continue;
+    }
+    int sig = -1;
+    for (int i = 0; i < sig_count; i++) {
+      if (strcmp(sig_names[i], s->function.name) == 0) {
+        sig = i;
+        break;
+      }
+    }
+    if (sig < 0 || sig_return_float[sig]) {
+      continue;
+    }
+    RFCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.params = sig_params[sig];
+    ctx.sig = sig;
+    rf_walk(s->function.body, &ctx);
+    if (ctx.saw_float) {
+      sig_return_float[sig] = 1;
+    }
+  }
+}
+
+/**
+ * @brief Promotes num globals initialized with a float to TYPE_FLOAT
+ * @param root Statement list (follows right chain)
+ */
+static void promote_global_inits(Node *root) {
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_VAR_DECL && s->var_decl.is_global &&
+        s->var_decl.value != NULL) {
+      int g = find_global(s->var_decl.name);
+      if (g >= 0 && global_types[g] == TYPE_INT &&
+          peek_type(s->var_decl.value) == TYPE_FLOAT) {
+        global_types[g] = TYPE_FLOAT;
+      }
+    }
+  }
 }
 
 /**
@@ -1720,6 +2244,10 @@ static void gen_data_section() {
   fprintf(out, "  fmt_open_w db \"wb\", 0\n");
   fprintf(out, "  fmt_openfail db \"could not open file\", 10, 0\n");
   fprintf(out, "  stack_floor dq 0\n");
+  /* Global variables: one dq per global, initialized to 0 at startup */
+  for (int i = 0; i < global_count; i++) {
+    fprintf(out, "  global_%s dq 0\n", global_names[i]);
+  }
   for (int i = 0; i < string_count; i++) {
     fprintf(out, "  str%d db ", i);
     if (string_table[i][0] == '\0') {
@@ -1876,7 +2404,7 @@ static void gen_len(Node *node) {
 }
 
 /**
- * @brief Generates toStr(num), result is a heap string pointer in rax
+ * @brief Generates tostr(num), result is a heap string pointer in rax
  * @param node Call node (exactly 1 num argument)
  * @details Formats into a malloc'd buffer with snprintf and returns the
  * buffer, so the result concatenates like any other string
@@ -1888,11 +2416,11 @@ static void gen_to_str(Node *node) {
     arg_count++;
   }
   if (arg_count != 1) {
-    codegen_error(node, "toStr takes exactly 1 argument");
+    codegen_error(node, "tostr takes exactly 1 argument");
   }
   ValueType given = expr_type(arg);
   if (!is_numeric(given)) {
-    codegen_error(arg, "toStr expects a num, got %s", type_name(given));
+    codegen_error(arg, "tostr expects a num, got %s", type_name(given));
   }
   int is_float = (given == TYPE_FLOAT);
   gen_expression(arg);
@@ -1928,7 +2456,7 @@ static void gen_to_str(Node *node) {
 }
 
 /**
- * @brief Generates toNum(str), result left in rax as double bits
+ * @brief Generates tonum(str), result left in rax as double bits
  * @param node Call node (exactly 1 str argument)
  */
 static void gen_to_num(Node *node) {
@@ -1938,11 +2466,11 @@ static void gen_to_num(Node *node) {
     arg_count++;
   }
   if (arg_count != 1) {
-    codegen_error(node, "toNum takes exactly 1 argument");
+    codegen_error(node, "tonum takes exactly 1 argument");
   }
   ValueType given = expr_type(arg);
   if (given != TYPE_STRING) {
-    codegen_error(arg, "toNum expects a str, got %s", type_name(given));
+    codegen_error(arg, "tonum expects a str, got %s", type_name(given));
   }
   gen_expression(arg);
   fprintf(out, "  test rax, rax\n");
@@ -2113,6 +2641,40 @@ static void gen_write_file(Node *node) {
  * @details First four arguments use rcx, rdx, r8, r9. The rest spill
  * onto the stack above the 32 byte shadow space (Windows x64).
  */
+/**
+ * @brief Non-zero if evaluating the expression never writes arg registers
+ * @details Used to pick the lean call path: every node it accepts only
+ *          touches rax/rbx/xmm and balanced stack slots, so earlier
+ *          arguments already loaded into rcx/rdx/r8/r9 stay intact.
+ *          Anything that calls the runtime (user calls, concat, strcmp,
+ *          malloc) is rejected.
+ * @param node Expression to classify (NULL is safe)
+ */
+static int expr_is_regsafe(Node *node) {
+  if (node == NULL) {
+    return 1;
+  }
+  switch (node->type) {
+  case NODE_INT_LITERAL:
+  case NODE_FLOAT_LITERAL:
+  case NODE_STRING_LITERAL:
+  case NODE_IDENTIFIER:
+  case NODE_NULL:
+    return 1;
+  case NODE_BINARY_OP: {
+    ValueType lt = peek_type(node->binary_op.left);
+    ValueType rt = peek_type(node->binary_op.right);
+    if (lt == TYPE_STRING || rt == TYPE_STRING) {
+      return 0;
+    }
+    return expr_is_regsafe(node->binary_op.left) &&
+           expr_is_regsafe(node->binary_op.right);
+  }
+  default:
+    return 0;
+  }
+}
+
 static void gen_call(Node *node) {
   const char *regs[4] = {"rcx", "rdx", "r8", "r9"};
   int arg_count = 0;
@@ -2127,11 +2689,11 @@ static void gen_call(Node *node) {
     gen_len(node);
     return;
   }
-  if (strcmp(node->func_call.name, "toStr") == 0) {
+  if (strcmp(node->func_call.name, "tostr") == 0) {
     gen_to_str(node);
     return;
   }
-  if (strcmp(node->func_call.name, "toNum") == 0) {
+  if (strcmp(node->func_call.name, "tonum") == 0) {
     gen_to_num(node);
     return;
   }
@@ -2173,6 +2735,52 @@ static void gen_call(Node *node) {
       sig_idx_for_call = s;
       break;
     }
+  }
+  /* Lean path: a single argument, or up to four side-effect-free
+     arguments, go straight from rax into the argument registers with no
+     spill/reload round trip. Only 32 bytes of shadow space are needed. */
+  int lean = (arg_count <= 1);
+  if (!lean && arg_count <= 4) {
+    lean = 1;
+    for (Node *a = node->func_call.args; a != NULL; a = a->right) {
+      if (!expr_is_regsafe(a)) {
+        lean = 0;
+        break;
+      }
+    }
+  }
+  if (lean) {
+    fprintf(out, "  sub rsp, 32\n");
+    int li = 0;
+    for (Node *a = node->func_call.args; a != NULL; a = a->right, li++) {
+      ValueType given = peek_type(a);
+      ValueType want = TYPE_INT;
+      Node *p = sig_param_head;
+      for (int k = 0; k < li && p != NULL; k++) {
+        p = p->right;
+      }
+      if (p != NULL) {
+        want = p->type == NODE_VAR_DECL ? type_keyword(p->var_decl.var_type)
+                                        : TYPE_INT;
+        if (want == TYPE_INT && sig_idx_for_call >= 0 && li < 32 &&
+            sig_param_float[sig_idx_for_call][li]) {
+          want = TYPE_FLOAT;
+        }
+      }
+      gen_expression(a);
+      if ((want == TYPE_INT || want == TYPE_BOOL) && given == TYPE_FLOAT) {
+        fprintf(out, "  movq xmm0, rax\n");
+        fprintf(out, "  cvttsd2si rax, xmm0\n");
+      } else if (want == TYPE_FLOAT &&
+                 (given == TYPE_INT || given == TYPE_BOOL)) {
+        fprintf(out, "  cvtsi2sd xmm0, rax\n");
+        fprintf(out, "  movq rax, xmm0\n");
+      }
+      fprintf(out, "  mov %s, rax\n", regs[li]);
+    }
+    fprintf(out, "  call %s\n", func_label(node->func_call.name));
+    fprintf(out, "  add rsp, 32\n");
+    return;
   }
   fprintf(out, "  sub rsp, %d\n", frame);
   int i = 0;
@@ -2617,7 +3225,11 @@ static void gen_expression(Node *node) {
   }
   case NODE_IDENTIFIER: {
     int slot = require_var(node, node->identifier.name);
-    fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+    if (slot_is_global(slot)) {
+      fprintf(out, "  mov rax, [rel global_%s]\n", node->identifier.name);
+    } else {
+      fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
+    }
     break;
   }
   case NODE_MEMBER_ACCESS: {
@@ -2708,9 +3320,20 @@ static void gen_expression(Node *node) {
     fprintf(out, "  lea rax, [rel str%d]\n", idx);
     break;
   }
-  case NODE_FUNC_CALL:
+  case NODE_FUNC_CALL: {
+    for (int s = 0; s < sig_count; s++) {
+      if (strcmp(sig_names[s], node->func_call.name) == 0) {
+        if (sig_return_type[s] != NULL &&
+            strcmp(sig_return_type[s], "void") == 0) {
+          codegen_error(node, "Cannot use result of void function '%s'",
+                        node->func_call.name);
+        }
+        break;
+      }
+    }
     gen_call(node);
     break;
+  }
   case NODE_NEW: {
     gen_new(node);
     break;
@@ -2891,19 +3514,52 @@ static void gen_expression(Node *node) {
       codegen_error(node, "Operator '%%' cannot be applied to float");
     }
     gen_expression(node->binary_op.left);
-    fprintf(out, "  push rax\n");
-    gen_expression(node->binary_op.right);
-    fprintf(out, "  mov rbx, rax\n");
-    fprintf(out, "  pop rax\n");
+    /* Fast path: a leaf right operand (literal/variable) loads straight into
+       rbx with no push/pop round trip, and small int literals are used as
+       immediates directly. */
+    int right_imm32 = 0;
+    if (!is_float && node->binary_op.right->type == NODE_INT_LITERAL) {
+      long long imm_val = node->binary_op.right->int_literal.value;
+      if (imm_val >= -2147483647LL - 1 && imm_val <= 2147483647LL) {
+        right_imm32 = 1;
+      }
+    }
+    if (is_leaf_expr(node->binary_op.right)) {
+      if (!right_imm32) {
+        gen_leaf_into_rbx(node->binary_op.right);
+      }
+    } else {
+      fprintf(out, "  push rax\n");
+      gen_expression(node->binary_op.right);
+      fprintf(out, "  mov rbx, rax\n");
+      fprintf(out, "  pop rax\n");
+    }
     if (!is_float) {
+      long long imm_val =
+          right_imm32 ? node->binary_op.right->int_literal.value : 0;
+      if (right_imm32 && (strcmp(op, "/") == 0 || strcmp(op, "%") == 0)) {
+        fprintf(out, "  mov rbx, %lld\n", imm_val);
+      }
       if (strcmp(op, "+") == 0) {
-        fprintf(out, "  add rax, rbx\n");
+        if (right_imm32) {
+          fprintf(out, "  add rax, %lld\n", imm_val);
+        } else {
+          fprintf(out, "  add rax, rbx\n");
+        }
         fprintf(out, "  jo overflow_trap\n");
       } else if (strcmp(op, "-") == 0) {
-        fprintf(out, "  sub rax, rbx\n");
+        if (right_imm32) {
+          fprintf(out, "  sub rax, %lld\n", imm_val);
+        } else {
+          fprintf(out, "  sub rax, rbx\n");
+        }
         fprintf(out, "  jo overflow_trap\n");
       } else if (strcmp(op, "*") == 0) {
-        fprintf(out, "  imul rax, rbx\n");
+        if (right_imm32) {
+          fprintf(out, "  imul rax, %lld\n", imm_val);
+        } else {
+          fprintf(out, "  imul rax, rbx\n");
+        }
         fprintf(out, "  jo overflow_trap\n");
       } else if (strcmp(op, "/") == 0) {
         if (node->binary_op.right->type == NODE_INT_LITERAL &&
@@ -2924,29 +3580,27 @@ static void gen_expression(Node *node) {
         fprintf(out, "  cqo\n");
         fprintf(out, "  idiv rbx\n");
         fprintf(out, "  mov rax, rdx\n");
-      } else if (strcmp(op, "==") == 0) {
-        fprintf(out, "  cmp rax, rbx\n");
-        fprintf(out, "  sete al\n");
-        fprintf(out, "  movzx rax, al\n");
-      } else if (strcmp(op, "!=") == 0) {
-        fprintf(out, "  cmp rax, rbx\n");
-        fprintf(out, "  setne al\n");
-        fprintf(out, "  movzx rax, al\n");
-      } else if (strcmp(op, "<") == 0) {
-        fprintf(out, "  cmp rax, rbx\n");
-        fprintf(out, "  setl al\n");
-        fprintf(out, "  movzx rax, al\n");
-      } else if (strcmp(op, ">") == 0) {
-        fprintf(out, "  cmp rax, rbx\n");
-        fprintf(out, "  setg al\n");
-        fprintf(out, "  movzx rax, al\n");
-      } else if (strcmp(op, "<=") == 0) {
-        fprintf(out, "  cmp rax, rbx\n");
-        fprintf(out, "  setle al\n");
-        fprintf(out, "  movzx rax, al\n");
-      } else if (strcmp(op, ">=") == 0) {
-        fprintf(out, "  cmp rax, rbx\n");
-        fprintf(out, "  setge al\n");
+      } else if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+                 strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+                 strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0) {
+        if (right_imm32) {
+          fprintf(out, "  cmp rax, %lld\n", imm_val);
+        } else {
+          fprintf(out, "  cmp rax, rbx\n");
+        }
+        if (strcmp(op, "==") == 0) {
+          fprintf(out, "  sete al\n");
+        } else if (strcmp(op, "!=") == 0) {
+          fprintf(out, "  setne al\n");
+        } else if (strcmp(op, "<") == 0) {
+          fprintf(out, "  setl al\n");
+        } else if (strcmp(op, ">") == 0) {
+          fprintf(out, "  setg al\n");
+        } else if (strcmp(op, "<=") == 0) {
+          fprintf(out, "  setle al\n");
+        } else {
+          fprintf(out, "  setge al\n");
+        }
         fprintf(out, "  movzx rax, al\n");
       } else {
         codegen_error(node, "Unsupported operator '%s' in codegen", op);
@@ -3050,12 +3704,40 @@ static void gen_condition_jump(Node *cond, int false_label) {
       ValueType rt = peek_type(cond->binary_op.right);
       int is_float = (lt == TYPE_FLOAT || rt == TYPE_FLOAT);
       if (!is_float) {
-        gen_expression(cond->binary_op.left);
-        fprintf(out, "  push rax\n");
-        gen_expression(cond->binary_op.right);
-        fprintf(out, "  mov rbx, rax\n");
-        fprintf(out, "  pop rax\n");
-        fprintf(out, "  cmp rax, rbx\n");
+        Node *cond_right = cond->binary_op.right;
+        Node *cond_left = cond->binary_op.left;
+        int right_imm32 = 0;
+        if (cond_right->type == NODE_INT_LITERAL) {
+          long long cv = cond_right->int_literal.value;
+          if (cv >= -2147483647LL - 1 && cv <= 2147483647LL) {
+            right_imm32 = 1;
+          }
+        }
+        if (right_imm32 && cond_left->type == NODE_IDENTIFIER) {
+          /* Best case: compare the variable memory operand directly. */
+          int slot = require_var(cond_left, cond_left->identifier.name);
+          if (slot_is_global(slot)) {
+            fprintf(out, "  cmp qword [rel global_%s], %lld\n",
+                    cond_left->identifier.name, cond_right->int_literal.value);
+          } else {
+            fprintf(out, "  cmp qword [rbp - %d], %lld\n", (slot + 1) * 8,
+                    cond_right->int_literal.value);
+          }
+        } else {
+          gen_expression(cond_left);
+          if (right_imm32) {
+            fprintf(out, "  cmp rax, %lld\n", cond_right->int_literal.value);
+          } else if (is_leaf_expr(cond_right)) {
+            gen_leaf_into_rbx(cond_right);
+            fprintf(out, "  cmp rax, rbx\n");
+          } else {
+            fprintf(out, "  push rax\n");
+            gen_expression(cond_right);
+            fprintf(out, "  mov rbx, rax\n");
+            fprintf(out, "  pop rax\n");
+            fprintf(out, "  cmp rax, rbx\n");
+          }
+        }
         if (strcmp(op, "==") == 0) {
           fprintf(out, "  jne label%d\n", false_label);
         } else if (strcmp(op, "!=") == 0) {
@@ -3265,6 +3947,35 @@ static void gen_block(Node *list) {
 static void gen_statement(Node *node) {
   switch (node->type) {
   case NODE_VAR_DECL: {
+    if (node->var_decl.is_global) {
+      /* Registered by the pre-scan; claim it and emit the initializer. */
+      int g = find_global(node->var_decl.name);
+      if (g < 0) {
+        codegen_error(node, "Global '%s' was not registered",
+                      node->var_decl.name);
+      }
+      if (global_init[g] != NULL) {
+        codegen_error(node, "Duplicate global variable '%s'",
+                      node->var_decl.name);
+      }
+      global_init[g] = "";
+      if (node->var_decl.value != NULL) {
+        ValueType igiven = peek_type(node->var_decl.value);
+        gen_expression(node->var_decl.value);
+        if (global_types[g] == TYPE_INT && igiven == TYPE_FLOAT) {
+          global_types[g] = TYPE_FLOAT;
+        } else if (global_types[g] == TYPE_FLOAT &&
+                   (igiven == TYPE_INT || igiven == TYPE_BOOL)) {
+          fprintf(out, "  cvtsi2sd xmm0, rax\n");
+          fprintf(out, "  movq rax, xmm0\n");
+        } else if (global_types[g] == TYPE_BOOL && igiven == TYPE_FLOAT) {
+          fprintf(out, "  movq xmm0, rax\n");
+          fprintf(out, "  cvttsd2si rax, xmm0\n");
+        }
+        fprintf(out, "  mov [rel global_%s], rax\n", node->var_decl.name);
+      }
+      break;
+    }
     int existing = find_var(node->var_decl.name);
     if (existing >= 0 && !var_is_param[existing]) {
       codegen_error(node, "Variable '%s' already declared",
@@ -3362,7 +4073,49 @@ static void gen_statement(Node *node) {
   }
   case NODE_ASSIGNMENT: {
     int slot = find_var(node->assignment.name);
+    int gslot = -1;
     if (slot < 0) {
+      gslot = find_global(node->assignment.name);
+      if (gslot >= 0) {
+        /* global assignment */
+        ValueType ggiven = expr_type(node->assignment.value);
+        if (!types_compatible(global_types[gslot], ggiven)) {
+          codegen_error(node->assignment.value, "Cannot assign %s to %s '%s'",
+                        type_name(ggiven), type_name(global_types[gslot]),
+                        node->assignment.name);
+        }
+        if (global_types[gslot] == TYPE_INT && ggiven == TYPE_FLOAT) {
+          gen_expression(node->assignment.value);
+          global_types[gslot] = TYPE_FLOAT;
+          fprintf(out, "  mov [rel global_%s], rax\n", node->assignment.name);
+          break;
+        }
+        if (global_types[gslot] == TYPE_BOOL && ggiven == TYPE_FLOAT) {
+          gen_expression(node->assignment.value);
+          fprintf(out, "  movq xmm0, rax\n");
+          fprintf(out, "  cvttsd2si rax, xmm0\n");
+          fprintf(out, "  mov [rel global_%s], rax\n", node->assignment.name);
+          break;
+        }
+        char rmw_addr[96];
+        snprintf(rmw_addr, sizeof(rmw_addr), "[rel global_%s]",
+                 node->assignment.name);
+        if ((global_types[gslot] == TYPE_INT ||
+             global_types[gslot] == TYPE_BOOL) &&
+            (ggiven == TYPE_INT || ggiven == TYPE_BOOL) &&
+            try_assign_rmw(node->assignment.name, node->assignment.value,
+                           rmw_addr, 1)) {
+          break;
+        }
+        gen_expression(node->assignment.value);
+        if (global_types[gslot] == TYPE_FLOAT &&
+            (ggiven == TYPE_INT || ggiven == TYPE_BOOL)) {
+          fprintf(out, "  cvtsi2sd xmm0, rax\n");
+          fprintf(out, "  movq rax, xmm0\n");
+        }
+        fprintf(out, "  mov [rel global_%s], rax\n", node->assignment.name);
+        break;
+      }
       codegen_error(node, "Variable '%s' not declared", node->assignment.name);
     }
     if (var_is_param[slot] && !no_param_warn &&
@@ -3411,9 +4164,13 @@ static void gen_statement(Node *node) {
                     type_name(given), type_name(var_types[slot]),
                     node->assignment.name);
     }
-    /* num holding a float becomes a float slot. */
+    /* Generate the RHS while the slot has its old type so self-references
+       (n = n * 1.5) still read the int-typed slot, then promote. */
     if (var_types[slot] == TYPE_INT && given == TYPE_FLOAT) {
+      gen_expression(node->assignment.value);
       var_types[slot] = TYPE_FLOAT;
+      fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+      break;
     }
     if (var_types[slot] == TYPE_FLOAT && given == TYPE_INT) {
       gen_expression(node->assignment.value);
@@ -3431,13 +4188,77 @@ static void gen_statement(Node *node) {
       fprintf(out, "  cvttsd2si rax, xmm0\n");
       fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
     } else {
-      gen_expression(node->assignment.value);
-      fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+      char rmw_addr[64];
+      snprintf(rmw_addr, sizeof(rmw_addr), "[rbp - %d]", (slot + 1) * 8);
+      if (var_types[slot] == TYPE_FLOAT || given == TYPE_FLOAT ||
+          !try_assign_rmw(node->assignment.name, node->assignment.value,
+                          rmw_addr, 0)) {
+        gen_expression(node->assignment.value);
+        fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
+      }
     }
     break;
   }
   case NODE_ADD_ASSIGN: {
     int slot = require_var(node, node->add_assign.name);
+    if (slot_is_global(slot)) {
+      int gi = slot_to_global(slot);
+      ValueType ggiven = peek_type(node->add_assign.value);
+      /* Validate (also catches undeclared vars on error path). */
+      {
+        ValueType checked = expr_type(node->add_assign.value);
+        (void)checked;
+      }
+      if (global_types[gi] == TYPE_STRING) {
+        fprintf(out, "  mov rax, [rel global_%s]\n", node->add_assign.name);
+        gen_right_operand_rbx(node->add_assign.value);
+        gen_string_concat();
+        fprintf(out, "  mov [rel global_%s], rax\n", node->add_assign.name);
+        break;
+      }
+      if (!is_numeric(global_types[gi])) {
+        codegen_error(node, "Cannot use += on non-numeric type '%s'",
+                      type_name(global_types[gi]));
+      }
+      int g_is_float = (global_types[gi] == TYPE_FLOAT);
+      int gv_is_float = (ggiven == TYPE_FLOAT);
+      if (global_types[gi] == TYPE_BOOL && gv_is_float) {
+        gen_expression(node->add_assign.value);
+        fprintf(out, "  movq xmm0, rax\n");
+        fprintf(out, "  cvttsd2si rax, xmm0\n");
+        fprintf(out, "  add [rel global_%s], rax\n", node->add_assign.name);
+        fprintf(out, "  jo overflow_trap\n");
+        break;
+      }
+      if (!g_is_float && !gv_is_float) {
+        fprintf(out, "  mov rax, [rel global_%s]\n", node->add_assign.name);
+        gen_right_operand_rbx(node->add_assign.value);
+        fprintf(out, "  add rax, rbx\n");
+        fprintf(out, "  jo overflow_trap\n");
+        fprintf(out, "  mov [rel global_%s], rax\n", node->add_assign.name);
+        break;
+      }
+      /* Float path. */
+      gen_expression(node->add_assign.value);
+      if (global_types[gi] == TYPE_INT) {
+        global_types[gi] = TYPE_FLOAT;
+      }
+      if (gv_is_float) {
+        fprintf(out, "  movq xmm1, rax\n");
+      } else {
+        fprintf(out, "  cvtsi2sd xmm1, rax\n");
+      }
+      if (g_is_float) {
+        fprintf(out, "  movq xmm0, [rel global_%s]\n", node->add_assign.name);
+      } else {
+        fprintf(out, "  mov rax, [rel global_%s]\n", node->add_assign.name);
+        fprintf(out, "  cvtsi2sd xmm0, rax\n");
+      }
+      fprintf(out, "  addsd xmm0, xmm1\n");
+      fprintf(out, "  movq rax, xmm0\n");
+      fprintf(out, "  mov [rel global_%s], rax\n", node->add_assign.name);
+      break;
+    }
     if (var_types[slot] == TYPE_STRING) {
       ValueType sgiven = expr_type(node->add_assign.value);
       if (sgiven != TYPE_STRING) {
@@ -3445,10 +4266,7 @@ static void gen_statement(Node *node) {
                       "Cannot concatenate string with %s", type_name(sgiven));
       }
       fprintf(out, "  mov rax, [rbp - %d]\n", (slot + 1) * 8);
-      fprintf(out, "  push rax\n");
-      gen_expression(node->add_assign.value);
-      fprintf(out, "  mov rbx, rax\n");
-      fprintf(out, "  pop rax\n");
+      gen_right_operand_rbx(node->add_assign.value);
       gen_string_concat();
       fprintf(out, "  mov [rbp - %d], rax\n", (slot + 1) * 8);
       break;
@@ -3482,10 +4300,10 @@ static void gen_statement(Node *node) {
     }
     /* Float path. */
     int var_before_float = var_is_float;
+    gen_expression(node->add_assign.value);
     if (var_types[slot] == TYPE_INT) {
       var_types[slot] = TYPE_FLOAT;
     }
-    gen_expression(node->add_assign.value);
     if (given_is_float) {
       fprintf(out, "  movq xmm1, rax\n");
     } else {
@@ -3504,6 +4322,62 @@ static void gen_statement(Node *node) {
   }
   case NODE_SUB_ASSIGN: {
     int slot = require_var(node, node->sub_assign.name);
+    if (slot_is_global(slot)) {
+      int gi = slot_to_global(slot);
+      ValueType ggiven = peek_type(node->sub_assign.value);
+      {
+        ValueType checked = expr_type(node->sub_assign.value);
+        (void)checked;
+      }
+      if (global_types[gi] == TYPE_STRING) {
+        codegen_error(node, "Operator '-=' cannot be applied to str");
+      }
+      if (!is_numeric(global_types[gi])) {
+        codegen_error(node, "Cannot use -= on non-numeric type '%s'",
+                      type_name(global_types[gi]));
+      }
+      int g_is_float = (global_types[gi] == TYPE_FLOAT);
+      int gv_is_float = (ggiven == TYPE_FLOAT);
+      if (global_types[gi] == TYPE_BOOL && gv_is_float) {
+        gen_expression(node->sub_assign.value);
+        fprintf(out, "  movq xmm0, rax\n");
+        fprintf(out, "  cvttsd2si rbx, xmm0\n");
+        fprintf(out, "  mov rax, [rel global_%s]\n", node->sub_assign.name);
+        fprintf(out, "  sub rax, rbx\n");
+        fprintf(out, "  jo overflow_trap\n");
+        fprintf(out, "  mov [rel global_%s], rax\n", node->sub_assign.name);
+        break;
+      }
+      if (!g_is_float && !gv_is_float) {
+        gen_expression(node->sub_assign.value);
+        fprintf(out, "  mov rbx, rax\n");
+        fprintf(out, "  mov rax, [rel global_%s]\n", node->sub_assign.name);
+        fprintf(out, "  sub rax, rbx\n");
+        fprintf(out, "  jo overflow_trap\n");
+        fprintf(out, "  mov [rel global_%s], rax\n", node->sub_assign.name);
+        break;
+      }
+      /* Float path. */
+      gen_expression(node->sub_assign.value);
+      if (global_types[gi] == TYPE_INT) {
+        global_types[gi] = TYPE_FLOAT;
+      }
+      if (gv_is_float) {
+        fprintf(out, "  movq xmm1, rax\n");
+      } else {
+        fprintf(out, "  cvtsi2sd xmm1, rax\n");
+      }
+      if (g_is_float) {
+        fprintf(out, "  movq xmm0, [rel global_%s]\n", node->sub_assign.name);
+      } else {
+        fprintf(out, "  mov rax, [rel global_%s]\n", node->sub_assign.name);
+        fprintf(out, "  cvtsi2sd xmm0, rax\n");
+      }
+      fprintf(out, "  subsd xmm0, xmm1\n");
+      fprintf(out, "  movq rax, xmm0\n");
+      fprintf(out, "  mov [rel global_%s], rax\n", node->sub_assign.name);
+      break;
+    }
     if (var_types[slot] == TYPE_STRING) {
       codegen_error(node, "Operator '-=' cannot be applied to str");
     }
@@ -3538,10 +4412,10 @@ static void gen_statement(Node *node) {
       break;
     }
     int var_before_float = var_is_float;
+    gen_expression(node->sub_assign.value);
     if (var_types[slot] == TYPE_INT) {
       var_types[slot] = TYPE_FLOAT;
     }
-    gen_expression(node->sub_assign.value);
     if (given_is_float) {
       fprintf(out, "  movq xmm1, rax\n");
     } else {
@@ -4019,6 +4893,26 @@ static void gen_statement(Node *node) {
       gen_print_string(value, value->string_literal.value);
     } else if (value != NULL && value->type == NODE_IDENTIFIER) {
       int slot = require_var(value, value->identifier.name);
+      if (slot_is_global(slot)) {
+        ValueType gt = global_types[slot_to_global(slot)];
+        if (gt == TYPE_STRING) {
+          fprintf(out, "  lea rcx, [rel fmt_str]\n");
+          fprintf(out, "  mov rdx, [rel global_%s]\n", value->identifier.name);
+        } else if (gt == TYPE_FLOAT) {
+          fprintf(out, "  movsd xmm0, [rel global_%s]\n",
+                  value->identifier.name);
+          fprintf(out, "  movq rdx, xmm0\n");
+          fprintf(out, "  lea rcx, [rel fmt_float]\n");
+          fprintf(out, "  movapd xmm1, xmm0\n");
+        } else {
+          fprintf(out, "  lea rcx, [rel fmt_int]\n");
+          fprintf(out, "  mov rdx, [rel global_%s]\n", value->identifier.name);
+        }
+        fprintf(out, "  sub rsp, 32\n");
+        fprintf(out, "  call printf\n");
+        fprintf(out, "  add rsp, 32\n");
+        break;
+      }
       if (var_types[slot] == TYPE_STRUCT || var_types[slot] == TYPE_CLASS) {
         codegen_error(value, "Cannot print %s '%s' directly",
                       var_type_name[slot], value->identifier.name);
@@ -4084,6 +4978,17 @@ static void gen_statement(Node *node) {
     break;
   }
   case NODE_RETURN: {
+    if (node->return_stmt.value == NULL) {
+      if (cur_return_type == NULL || strcmp(cur_return_type, "void") != 0) {
+        codegen_error(node,
+                      "Bare 'return;' is only allowed in functions declared "
+                      "'-> void'");
+      }
+    } else if (cur_return_type != NULL &&
+               strcmp(cur_return_type, "void") == 0) {
+      codegen_error(node->return_stmt.value,
+                    "Function declared '-> void' cannot return a value");
+    }
     if (in_method && cur_class >= 0 && cur_method >= 0) {
       const char *rt = class_defs[cur_class].methods[cur_method].ret_type;
       const char *mname = class_defs[cur_class].methods[cur_method].name;
@@ -4122,8 +5027,16 @@ static void gen_statement(Node *node) {
           fprintf(out, "  movq rax, xmm0\n");
         }
       }
-    } else {
+    } else if (node->return_stmt.value != NULL) {
+      ValueType rgiven = peek_type(node->return_stmt.value);
       gen_expression(node->return_stmt.value);
+      /* Float-returning functions normalize int results so every
+         caller can read the return slot as a double. */
+      if (cur_sig_idx >= 0 && sig_return_float[cur_sig_idx] &&
+          (rgiven == TYPE_INT || rgiven == TYPE_BOOL)) {
+        fprintf(out, "  cvtsi2sd xmm0, rax\n");
+        fprintf(out, "  movq rax, xmm0\n");
+      }
     }
     if (in_function) {
       fprintf(out, "  mov rsp, rbp\n");
@@ -4440,9 +5353,12 @@ static void gen_function(Node *node) {
   int saved_count = var_count;
   int saved_arrays = array_count;
   int saved_in_function = in_function;
+  const char *saved_return_type = cur_return_type;
+  int saved_sig_idx = cur_sig_idx;
   var_count = 0;
   array_count = 0;
   in_function = 1;
+  cur_return_type = node->function.return_type;
 
   fprintf(out, "%s:\n", func_label(name));
   gen_prologue();
@@ -4456,6 +5372,7 @@ static void gen_function(Node *node) {
       break;
     }
   }
+  cur_sig_idx = sig_idx;
   for (Node *p = node->function.params; p != NULL; p = p->right) {
     const char *param_name = NULL;
     ValueType param_type = TYPE_INT;
@@ -4515,6 +5432,8 @@ static void gen_function(Node *node) {
   var_count = saved_count;
   array_count = saved_arrays;
   in_function = saved_in_function;
+  cur_return_type = saved_return_type;
+  cur_sig_idx = saved_sig_idx;
 }
 
 /**
@@ -4536,12 +5455,15 @@ static void gen_method(int class_idx, int method_idx) {
   int saved_in_method = in_method;
   int saved_class = cur_class;
   int saved_method = cur_method;
+  const char *saved_return_type = cur_return_type;
+  int saved_sig_idx = cur_sig_idx;
   var_count = 0;
   array_count = 0;
   in_function = 1;
   in_method = 1;
   cur_class = class_idx;
   cur_method = method_idx;
+  cur_return_type = md->ret_type;
 
   fprintf(out, "%s:\n", label);
   gen_prologue();
@@ -4562,6 +5484,7 @@ static void gen_method(int class_idx, int method_idx) {
       break;
     }
   }
+  cur_sig_idx = sig_idx;
   const char *param_regs[4] = {"rcx", "rdx", "r8", "r9"};
   int param_index = 0;
   for (Node *p = md->params; p != NULL; p = p->right) {
@@ -4618,6 +5541,8 @@ static void gen_method(int class_idx, int method_idx) {
   in_method = saved_in_method;
   cur_class = saved_class;
   cur_method = saved_method;
+  cur_return_type = saved_return_type;
+  cur_sig_idx = saved_sig_idx;
 }
 
 /**
@@ -4752,6 +5677,8 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
   frame_size = 2048;
   in_function = 0;
   in_method = 0;
+  cur_return_type = NULL;
+  cur_sig_idx = -1;
   loop_depth = 0;
   cur_class = -1;
   cur_method = -1;
@@ -4765,6 +5692,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
     }
   }
 
+  global_count = 0;
   sig_count = 0;
   for (Node *s = root; s != NULL; s = s->right) {
     if (s->type == NODE_FUNCTION && sig_count < 256) {
@@ -4773,6 +5701,7 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
       memcpy(sig_names[sig_count], s->function.name, len);
       sig_names[sig_count][len] = '\0';
       sig_params[sig_count] = s->function.params;
+      sig_return_type[sig_count] = s->function.return_type;
       sig_count++;
     }
   }
@@ -5000,11 +5929,37 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
       method_slot(class_defs[c].methods[m].name);
     }
   }
+  /* Register globals before the type scans so find_global resolves. */
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_VAR_DECL && s->var_decl.is_global) {
+      const char *dk = NULL;
+      ValueType dt = resolve_decl_type(s->var_decl.var_type, s, &dk);
+      int found = -1;
+      for (int i = 0; i < global_count; i++) {
+        if (strcmp(global_names[i], s->var_decl.name) == 0) {
+          found = i;
+          break;
+        }
+      }
+      if (found >= 0) {
+        collect_error(s, "Duplicate global variable '%s'", s->var_decl.name);
+      } else if (global_count < 256) {
+        size_t nlen = strlen(s->var_decl.name);
+        global_names[global_count] = malloc(nlen + 1);
+        memcpy(global_names[global_count], s->var_decl.name, nlen);
+        global_names[global_count][nlen] = '\0';
+        global_types[global_count] = dt;
+        global_init[global_count] = NULL;
+        global_count++;
+      }
+    }
+  }
   for (int i = 0; i < sig_count; i++) {
     for (int j = 0; j < 32; j++) {
       sig_param_float[i][j] = 0;
     }
     sig_is_bool_only[i] = 0;
+    sig_return_float[i] = 0;
   }
   /* Bool-only functions return comparisons, never floats. */
   for (int i = 0; i < sig_count; i++) {
@@ -5037,8 +5992,14 @@ void GenerateAssembly(Node *root, const char *source, const char *output) {
       }
     }
   }
-  scan_float_calls(root);
   scan_method_float_calls(root);
+  /* Param and return float promotion refine each other; iterate to a
+     fixed point (both scans are monotone, so this converges). */
+  for (int pass = 0; pass < 3; pass++) {
+    scan_float_calls(root);
+    scan_return_floats(root);
+    promote_global_inits(root);
+  }
 
   collect_strings(root);
 

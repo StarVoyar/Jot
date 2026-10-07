@@ -1,0 +1,29 @@
+global num counter;
+global str greeting;
+global num total;
+
+fn private bump() {
+  counter += 1;
+}
+
+counter = 10;
+counter += 5;
+print(tostr(counter));
+print("\n");
+
+greeting = "hello global";
+print(greeting);
+print("\n");
+
+total = 0;
+num i = 0;
+while (i < 5) {
+  total += i;
+  i += 1;
+}
+print(tostr(total));
+print("\n");
+
+bump();
+print(tostr(counter));
+print("\n");

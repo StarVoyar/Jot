@@ -156,6 +156,13 @@ Token *Lexer(FILE *file) {
         free(token);
         break;
       }
+      case '\'': {
+        Token *token = lex_char(&current_index);
+        tokens[tokens_index] = *token;
+        tokens_index++;
+        free(token);
+        break;
+      }
       default: {
         Token *token = lex_unknown(character);
         tokens[tokens_index] = *token;
@@ -375,7 +382,8 @@ Token *lex_keyword(char current_char, int *current_index) {
       strcmp(keyword, "arr") == 0 || strcmp(keyword, "struct") == 0 ||
       strcmp(keyword, "class") == 0 || strcmp(keyword, "new") == 0 ||
       strcmp(keyword, "inherit") == 0 || strcmp(keyword, "break") == 0 ||
-      strcmp(keyword, "continue") == 0 || strcmp(keyword, "null") == 0) {
+      strcmp(keyword, "continue") == 0 || strcmp(keyword, "null") == 0 ||
+      strcmp(keyword, "char") == 0 || strcmp(keyword, "global") == 0) {
     token->type = KEYWORD;
     size_t len = strlen(keyword);
     token->value = malloc(len + 1);
@@ -427,7 +435,8 @@ Token *lex_operator(char character, int *current_index) {
       (character == '<' && next_char == '=') ||
       (character == '>' && next_char == '=') ||
       (character == '+' && next_char == '=') ||
-      (character == '-' && next_char == '=')) {
+      (character == '-' && next_char == '=') ||
+      (character == '-' && next_char == '>')) {
     op[1] = next_char;
     (*current_index)++;
   }
@@ -504,6 +513,128 @@ Token *lex_string(int *current_index) {
   memcpy(token->value, string, len);
   token->value[len] = '\0';
   token->type = STRING;
+  return token;
+}
+
+/**
+ * @brief Lexes a character literal, decoding escape sequences
+ * @param current_index Current position in buffer (updated)
+ * @return INT token with the character's numeric value, or UNKNOWN for
+ * invalid literals so the parser reports them with position information
+ * @details Supports \n \t \r \0 \\ \' \"; a literal must hold exactly one
+ * character between single quotes
+ */
+Token *lex_char(int *current_index) {
+  Token *token = malloc(sizeof(Token));
+  token->line = token_line;
+  token->col = token_col;
+  (*current_index)++; /* skip opening ' */
+
+  long code = -1;
+  int invalid = 0;
+  int raw_done = 0;
+  char prefix[3];
+  int prefix_len = 0;
+  char current_char = global_buffer[*current_index];
+
+  if (current_char == '\'') {
+    /* Empty literal. */
+    invalid = 1;
+    raw_done = 1;
+    (*current_index)++;
+  } else if (current_char == '\0') {
+    invalid = 1;
+  } else if (current_char == '\\' &&
+             global_buffer[*current_index + 1] != '\0') {
+    char escape = global_buffer[*current_index + 1];
+    int decoded = (unsigned char)escape;
+    int is_escape = 1;
+    switch (escape) {
+    case 'n':
+      decoded = '\n';
+      break;
+    case 't':
+      decoded = '\t';
+      break;
+    case 'r':
+      decoded = '\r';
+      break;
+    case '0':
+      decoded = '\0';
+      break;
+    case '\'':
+      decoded = '\'';
+      break;
+    case '"':
+      decoded = '"';
+      break;
+    case '\\':
+      decoded = '\\';
+      break;
+    default:
+      is_escape = 0;
+      break;
+    }
+    if (is_escape) {
+      code = decoded;
+      (*current_index) += 2;
+      if (global_buffer[*current_index] == '\'') {
+        (*current_index)++;
+      } else {
+        prefix[0] = '\\';
+        prefix[1] = escape;
+        prefix_len = 2;
+        invalid = 1;
+      }
+    } else {
+      /* Unknown escape: not a single character, report below. */
+      invalid = 1;
+    }
+  } else {
+    code = (unsigned char)current_char;
+    (*current_index)++;
+    if (global_buffer[*current_index] == '\'') {
+      (*current_index)++;
+    } else {
+      prefix[0] = current_char;
+      prefix_len = 1;
+      invalid = 1;
+    }
+  }
+
+  if (!invalid) {
+    char digits[24];
+    int n = snprintf(digits, sizeof(digits), "%ld", code);
+    token->value = malloc((size_t)n + 1);
+    memcpy(token->value, digits, (size_t)n + 1);
+    token->type = INT;
+    return token;
+  }
+
+  /* Invalid literal: capture the raw text through the closing quote so the
+     parser's "Unexpected '...' " message shows what was written. */
+  char raw[64];
+  int raw_index = 0;
+  if (prefix_len > 0) {
+    memcpy(raw, prefix, (size_t)prefix_len);
+    raw_index = prefix_len;
+  }
+  while (!raw_done && raw_index < 63) {
+    current_char = global_buffer[*current_index];
+    if (current_char == '\0' || current_char == '\n') {
+      break;
+    }
+    if (current_char == '\'') {
+      (*current_index)++;
+      break;
+    }
+    raw[raw_index++] = current_char;
+    (*current_index)++;
+  }
+  raw[raw_index] = '\0';
+  token->value = malloc((size_t)raw_index + 1);
+  memcpy(token->value, raw, (size_t)raw_index + 1);
+  token->type = UNKNOWN;
   return token;
 }
 

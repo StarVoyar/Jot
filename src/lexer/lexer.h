@@ -85,6 +85,14 @@ Token *lex_operator(char character, int *current_index);
 Token *lex_string(int *current_index);
 
 /**
+ * @brief Lexes a character literal such as 'A' or '\n'
+ * @param current_index Current position in buffer (updated)
+ * @return INT token holding the character's numeric value, or UNKNOWN
+ * for invalid literals (empty, multi-character, unterminated)
+ */
+Token *lex_char(int *current_index);
+
+/**
  * @brief Lexes an unknown character
  * @param character Unknown character
  * @return Token for unknown character

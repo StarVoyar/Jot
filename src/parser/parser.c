@@ -1236,19 +1236,34 @@ static Node *parse_return() {
   Node *node = create_node(NODE_RETURN);
   current_token++;
 
+  node->return_stmt.value = NULL;
+
+  /* Bare return; (only valid in functions declared '-> void') */
+  if (current_token->type != END_OF_TOKENS &&
+      strcmp(current_token->value, ";") == 0) {
+    current_token++;
+    return node;
+  }
+
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, "(") != 0) {
-    parse_error_expected("Expected '(' after return\n");
+    parse_error_expected("Expected '(' or ';' after return\n");
   }
   current_token++;
 
-  node->return_stmt.value = parse_expression();
+  if (current_token->type != END_OF_TOKENS &&
+      strcmp(current_token->value, ")") == 0) {
+    parse_warning("Empty 'return()' - use 'return;' instead\n");
+    current_token++;
+  } else {
+    node->return_stmt.value = parse_expression();
 
-  if (current_token->type == END_OF_TOKENS ||
-      strcmp(current_token->value, ")") != 0) {
-    parse_error_expected("Expected ')' after return value\n");
+    if (current_token->type == END_OF_TOKENS ||
+        strcmp(current_token->value, ")") != 0) {
+      parse_error_expected("Expected ')' after return value\n");
+    }
+    current_token++;
   }
-  current_token++;
 
   if (current_token->type == END_OF_TOKENS ||
       strcmp(current_token->value, ";") != 0) {
@@ -1282,6 +1297,7 @@ static Node *parse_var_decl() {
   current_token++;
 
   node->var_decl.value = NULL;
+  node->var_decl.is_global = 0;
 
   if (current_token->type != END_OF_TOKENS &&
       strcmp(current_token->value, "=") == 0) {
@@ -1296,6 +1312,27 @@ static Node *parse_var_decl() {
   current_token++;
 
   return node;
+}
+
+/**
+ * @brief Parses a global variable declaration (global num x = 0;)
+ * @return AST node marked as global
+ */
+static Node *parse_global_decl() {
+  current_token++; /* consume 'global' */
+  if (current_token->type == KEYWORD &&
+      (strcmp(current_token->value, "num") == 0 ||
+       strcmp(current_token->value, "bool") == 0 ||
+       strcmp(current_token->value, "str") == 0 ||
+       strcmp(current_token->value, "char") == 0)) {
+    Node *node = parse_var_decl();
+    if (node != NULL) {
+      node->var_decl.is_global = 1;
+    }
+    return node;
+  }
+  parse_error_expected("Expected type (num, bool, str, char) after 'global'\n");
+  return NULL;
 }
 
 /**
@@ -1624,6 +1661,14 @@ static Node *clone_node(Node *node) {
     copy->function.is_public = node->function.is_public;
     copy->function.params = clone_list(node->function.params);
     copy->function.body = clone_list(node->function.body);
+    if (node->function.return_type != NULL) {
+      len = strlen(node->function.return_type);
+      copy->function.return_type = malloc(len + 1);
+      memcpy(copy->function.return_type, node->function.return_type, len);
+      copy->function.return_type[len] = '\0';
+    } else {
+      copy->function.return_type = NULL;
+    }
     break;
   case NODE_VAR_DECL:
     len = strlen(node->var_decl.var_type);
@@ -2311,6 +2356,7 @@ static Node *parse_struct_def() {
     }
     current_token++;
     field->var_decl.value = NULL;
+    field->var_decl.is_global = 0;
     {
       int dup = 0;
       for (Node *f = node->struct_def.fields; f != NULL; f = f->right) {
@@ -2406,6 +2452,7 @@ static Node *parse_method_def() {
         param->var_decl.name[len] = '\0';
         check_reserved_ident(param->var_decl.name);
         param->var_decl.value = NULL;
+        param->var_decl.is_global = 0;
         current_token++;
       } else if (current_token->type == IDENTIFIER) {
         if (current_token[1].type == IDENTIFIER) {
@@ -2421,6 +2468,7 @@ static Node *parse_method_def() {
           param->var_decl.name[len] = '\0';
           check_reserved_ident(param->var_decl.name);
           param->var_decl.value = NULL;
+          param->var_decl.is_global = 0;
           current_token++;
         } else {
           param = create_node(NODE_IDENTIFIER);
@@ -2629,6 +2677,7 @@ static Node *parse_class_def() {
       }
       current_token++;
       field->var_decl.value = NULL;
+      field->var_decl.is_global = 0;
       {
         int skip = 0;
         for (Node *f = node->class_def.fields; f != NULL; f = f->right) {
@@ -2751,6 +2800,7 @@ static Node *parse_function() {
         param->var_decl.name[len] = '\0';
         check_reserved_ident(param->var_decl.name);
         param->var_decl.value = NULL;
+        param->var_decl.is_global = 0;
         current_token++;
       } else if (current_token->type == IDENTIFIER) {
         if (current_token[1].type == IDENTIFIER) {
@@ -2766,6 +2816,7 @@ static Node *parse_function() {
           param->var_decl.name[len] = '\0';
           check_reserved_ident(param->var_decl.name);
           param->var_decl.value = NULL;
+          param->var_decl.is_global = 0;
           current_token++;
         } else {
           param = create_node(NODE_IDENTIFIER);
@@ -2818,6 +2869,26 @@ static Node *parse_function() {
   int paren_line = current_token->line;
   int paren_col = current_token->col;
   current_token++;
+
+  /* --- NEW: optional return-type -> type --- */
+  node->function.return_type = NULL;
+  if (current_token->type == OPERATOR &&
+      strcmp(current_token->value, "->") == 0) {
+    current_token++;
+    if ((current_token->type == KEYWORD &&
+         (strcmp(current_token->value, "num") == 0 ||
+          strcmp(current_token->value, "str") == 0 ||
+          strcmp(current_token->value, "arr") == 0 ||
+          strcmp(current_token->value, "char") == 0)) ||
+        (current_token->type == IDENTIFIER &&
+         strcmp(current_token->value, "void") == 0)) {
+      node->function.return_type = strdup(current_token->value);
+      current_token++;
+    } else {
+      parse_error_expected("Expected type after '->' in function return\n");
+    }
+  }
+  /* ----------------------------------------- */
 
   if (!has_visibility) {
     char message[96];
@@ -2966,6 +3037,7 @@ static Node *parse_typed_var_decl() {
   current_token++;
 
   node->var_decl.value = NULL;
+  node->var_decl.is_global = 0;
 
   if (current_token->type != END_OF_TOKENS &&
       strcmp(current_token->value, "=") == 0) {
@@ -3000,10 +3072,13 @@ static Node *parse_statement() {
       return parse_print();
     } else if (strcmp(current_token->value, "num") == 0 ||
                strcmp(current_token->value, "bool") == 0 ||
-               strcmp(current_token->value, "str") == 0) {
+               strcmp(current_token->value, "str") == 0 ||
+               strcmp(current_token->value, "char") == 0) {
       return parse_var_decl();
     } else if (strcmp(current_token->value, "arr") == 0) {
       return parse_array_decl();
+    } else if (strcmp(current_token->value, "global") == 0) {
+      return parse_global_decl();
     } else if (strcmp(current_token->value, "fn") == 0) {
       return parse_function();
     } else if (strcmp(current_token->value, "struct") == 0) {

@@ -1,0 +1,9 @@
+fn public foo() -> str { return("hello"); }
+
+fn public main() {
+  str s = foo();
+  print(s);
+  print("\n");
+}
+
+main();
