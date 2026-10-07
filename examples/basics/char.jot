@@ -1,0 +1,6 @@
+fn public main() {
+  char c = 65;
+  print(c);
+  print("\n");
+}
+main();

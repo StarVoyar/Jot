@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+#undef strdup
 
 #include "codegen.h"
 

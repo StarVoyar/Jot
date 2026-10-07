@@ -2365,8 +2365,8 @@ static Node *parse_method_def() {
   check_reserved_ident(node->method_def.name);
   if (strcmp(node->method_def.name, "input") == 0 ||
       strcmp(node->method_def.name, "len") == 0 ||
-      strcmp(node->method_def.name, "toStr") == 0 ||
-      strcmp(node->method_def.name, "toNum") == 0 ||
+      strcmp(node->method_def.name, "tostr") == 0 ||
+      strcmp(node->method_def.name, "tonum") == 0 ||
       strcmp(node->method_def.name, "readFile") == 0 ||
       strcmp(node->method_def.name, "writeFile") == 0) {
     parse_error("Method name is reserved\n");
@@ -2702,8 +2702,8 @@ static Node *parse_function() {
   node->function.name[len] = '\0';
   if (strcmp(node->function.name, "input") == 0 ||
       strcmp(node->function.name, "len") == 0 ||
-      strcmp(node->function.name, "toStr") == 0 ||
-      strcmp(node->function.name, "toNum") == 0 ||
+      strcmp(node->function.name, "tostr") == 0 ||
+      strcmp(node->function.name, "tonum") == 0 ||
       strcmp(node->function.name, "readFile") == 0 ||
       strcmp(node->function.name, "writeFile") == 0) {
     parse_error("Function name is reserved, use another name\n");
@@ -3170,8 +3170,8 @@ Node *Parser(Token *tokens, const char *filename) {
     for (int k = 0; k < call_count; k++) {
       if (strcmp(calls[k]->func_call.name, "input") == 0 ||
           strcmp(calls[k]->func_call.name, "len") == 0 ||
-          strcmp(calls[k]->func_call.name, "toStr") == 0 ||
-          strcmp(calls[k]->func_call.name, "toNum") == 0 ||
+          strcmp(calls[k]->func_call.name, "tostr") == 0 ||
+          strcmp(calls[k]->func_call.name, "tonum") == 0 ||
           strcmp(calls[k]->func_call.name, "readFile") == 0 ||
           strcmp(calls[k]->func_call.name, "writeFile") == 0) {
         continue;
