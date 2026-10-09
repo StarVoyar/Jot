@@ -1,0 +1,22 @@
+fn public main() {
+  num a = 1;
+  num b = 2;
+  num c = 3;
+  num d = 4;
+  num e = 5;
+  num f = 6;
+  num g = 7;
+  num h = 8;
+  num r = a * b + c * d + e * f + g * h;
+  print(r);
+  print("\n");
+  num s = (a + b) * (c + d) - (e + f) * (g - h);
+  print(s);
+  print("\n");
+  num t = a + b + c + d + e + f + g + h + r + s;
+  print(t);
+  print("\n");
+  return(0);
+}
+
+main();

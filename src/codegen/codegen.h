@@ -9,12 +9,16 @@
 #include <string.h>
 
 /**
- * @brief Generates NASM x86-64 assembly from optimized IR
+ * @brief Generates assembly from optimized IR for the selected target
  * @param mod IR module (functions, globals, strings, vtables)
  * @param source Source file path used in error messages
  * @param output Output assembly file path
- * @details Pure emission: all names, types, and layouts are resolved.
+ * @param target "win64", "elf64", or NULL for the host default
+ * @details Runs register allocation per function, then emits through
+ * instruction selection. Pure emission: all names, types, and layouts
+ * are resolved.
  */
-void GenerateAssembly(IrModule *mod, const char *source, const char *output);
+void GenerateAssembly(IrModule *mod, const char *source, const char *output,
+                      const char *target);
 
 #endif

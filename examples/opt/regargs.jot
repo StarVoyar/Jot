@@ -1,0 +1,20 @@
+fn public sum8(num a, num b, num c, num d, num e, num f, num g, num h) -> num {
+  return(self.a + self.b + self.c + self.d + self.e + self.f + self.g + self.h);
+}
+
+fn public fib(num n) -> num {
+  if (n < 2) {
+    return(self.n);
+  }
+  return(fib(self.n - 1) + fib(self.n - 2));
+}
+
+fn public main() {
+  print(sum8(1, 2, 3, 4, 5, 6, 7, 8));
+  print("\n");
+  print(fib(15));
+  print("\n");
+  return(0);
+}
+
+main();

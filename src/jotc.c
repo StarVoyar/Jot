@@ -142,7 +142,7 @@ static char *default_out_path(const char *input) {
 int main(int argc, char *argv[]) {
   if (argc < 2 || strcmp(argv[1], "--help") == 0) {
     printf("Usage: %s <file.jot> [-o output] [--debug] [-O0|-O1|-O2] "
-           "[--emit-ir]\n",
+           "[--emit-ir] [--target win64|elf64]\n",
            argv[0]);
     printf("  -o output    Output file (e.g., main.exe, main.o, or main)\n");
     printf("  --debug      Print tokens, AST, and assembly path\n");
@@ -150,18 +150,29 @@ int main(int argc, char *argv[]) {
     printf("  -O1          Safe basic optimizations (default)\n");
     printf("  -O2          O1 plus local common-subexpression elimination\n");
     printf("  --emit-ir    Print the optimized IR and stop (no assembly)\n");
+    printf("  --target     win64 (default on Windows) or elf64 (default "
+           "elsewhere)\n");
     return 1;
   }
 
   int debug = 0;
   int emit_ir = 0;
   OptLevel level = OPT_O1;
+  const char *target = NULL;
   const char *out_arg = NULL;
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--debug") == 0) {
       debug = 1;
     } else if (strcmp(argv[i], "--emit-ir") == 0) {
       emit_ir = 1;
+    } else if (strcmp(argv[i], "--target") == 0) {
+      if (i + 1 < argc) {
+        target = argv[i + 1];
+        i++;
+      } else {
+        compiler_error("--target requires win64 or elf64\n");
+        return 1;
+      }
     } else if (strcmp(argv[i], "-O0") == 0) {
       level = OPT_O0;
     } else if (strcmp(argv[i], "-O1") == 0) {
@@ -180,7 +191,7 @@ int main(int argc, char *argv[]) {
       out_arg = argv[i];
     } else {
       printf("Usage: %s <file.jot> [-o output] [--debug] [-O0|-O1|-O2] "
-             "[--emit-ir]\n",
+             "[--emit-ir] [--target win64|elf64]\n",
              argv[0]);
       return 1;
     }
@@ -253,7 +264,7 @@ int main(int argc, char *argv[]) {
         "Output file '%s' already exists and will be overwritten\n", out_file);
   }
 
-  GenerateAssembly(mod, argv[1], out_file);
+  GenerateAssembly(mod, argv[1], out_file, target);
   if (term_errors() > 0) {
     /* Codegen diagnostics already printed: drop the partial asm, stop. */
     remove(out_file);

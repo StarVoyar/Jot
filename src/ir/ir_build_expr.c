@@ -37,17 +37,21 @@ int irb_temp(BuildCtx *ctx, IrType t) {
   return slot;
 }
 
-IrInstr *irb_emit(BuildCtx *ctx, IrInstr ins) { return ir_emit(ctx->cur, ins); }
+IrBlock *irb_cur(BuildCtx *ctx) { return &ctx->f->blocks[ctx->cur]; }
+
+IrInstr *irb_emit(BuildCtx *ctx, IrInstr ins) {
+  return ir_emit(irb_cur(ctx), ins);
+}
 
 IrBlock *irb_block(BuildCtx *ctx) {
-  ctx->cur = ir_add_block(ctx->f);
-  return ctx->cur;
+  ctx->cur = ir_add_block(ctx->f)->id;
+  return irb_cur(ctx);
 }
 
 int irb_fresh(BuildCtx *ctx) { return ir_add_block(ctx->f)->id; }
 
 void irb_goto(BuildCtx *ctx, int id) {
-  ctx->cur = &ctx->f->blocks[id];
+  ctx->cur = id;
   ctx->terminated = 0;
 }
 

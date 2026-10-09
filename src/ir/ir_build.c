@@ -1197,7 +1197,7 @@ static IrFunc *lower_body(IrModule *m, const char *name, const char *label,
   ctx.cls = cls;
   ctx.ret_float = ret_float;
   ctx.ret_kind = ret_kind;
-  ctx.cur = ir_add_block(f);
+  irb_block(&ctx);
   /* Declare every frame variable in the builder scope. */
   for (int i = 0; i < nvars; i++) {
     irb_scope_declare(&ctx, vars[i].name, vars[i].slot);
@@ -1281,7 +1281,7 @@ IrModule *ir_build(Node *root) {
     ctx.f = f;
     ctx.vars = sp->entry_vars;
     ctx.nvars = sp->nentry_vars;
-    ctx.cur = &f->blocks[0];
+    ctx.cur = 0;
     for (int i = 0; i < sp->nentry_vars; i++) {
       irb_scope_declare(&ctx, sp->entry_vars[i].name,
                         sp->entry_vars[i].slot);

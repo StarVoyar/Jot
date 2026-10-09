@@ -4,7 +4,7 @@ A compiled programming language written in C. `jotc` lexes, parses, semantically
 
 ## Current Status
 
-Working end-to-end compiler: lexer (tokens) → parser (AST) → semantic analysis → Jot IR → optimization (`-O0`/`-O1`/`-O2`) → x86-64 backend (`.asm` in `build/bin/generated/`) → `nasm` + `gcc` → executable. Verified on Windows (`win64`); Unix targets `elf64`.
+Working end-to-end compiler: lexer (tokens) → parser (AST) → semantic analysis → Jot IR → optimization (`-O0`/`-O1`/`-O2`) → target backend with linear-scan register allocation (`.asm` in `build/bin/generated/`) → `nasm` + `gcc` → executable. Targets: Windows x86-64 (`win64`) and Linux x86-64 (`elf64`), each with its own calling convention; verified by executing all examples on Windows and on Linux (via WSL).
 
 ## Language Features
 
@@ -55,12 +55,12 @@ Targets: `build` compiles `src/**/*.c`, `link` links `build/bin/jotc`, `debug` d
 ## Usage
 
 ```bash
-./build/bin/jotc <file.jot> [-o output] [--debug] [-O0|-O1|-O2] [--emit-ir]
+./build/bin/jotc <file.jot> [-o output] [--debug] [-O0|-O1|-O2] [--emit-ir] [--target win64|elf64]
 ```
 
 The `-o` flag specifies the output file (e.g., `main.exe`, `main.o`, or `main`). The compiler validates that the output directory exists and warns if the file already exists. Without `-o`, the assembly goes to `build/bin/generated/<name>.asm`. Without `--debug` only errors/warnings print. Exit status is `1` when anything failed to compile, `0` otherwise (warnings still compile).
 
-Compiler options: `-O0` emits straightforward unoptimized code, `-O1` (default) enables safe basic optimizations, `-O2` adds local common-subexpression elimination. `--emit-ir` prints the optimized three-address IR to stdout and stops without writing assembly.
+Compiler options: `-O0` emits straightforward unoptimized code, `-O1` (default) enables safe basic optimizations, `-O2` adds local common-subexpression elimination. `--emit-ir` prints the optimized three-address IR to stdout and stops without writing assembly. `--target` selects `win64` (default on Windows) or `elf64` (default elsewhere); assemble `win64` output with `nasm -f win64` and `elf64` output with `nasm -f elf64`, then link with the platform `gcc`.
 
 ## Example
 
@@ -223,6 +223,7 @@ while (i < 10) {
 - Written in C (`-Wall -Wextra` clean)
 - Pipeline: `src/lexer/` tokenizes source (`line`/`col` on every token); `src/parser/` parses (recursive descent to AST, statements chained via `right`, plus import merging and call validation); `src/sem/` resolves meaning (symbols, types, fields, methods, inheritance, conversions, returns — diagnostics keep their messages and locations); `src/ir/` lowers the checked program to typed three-address IR (basic blocks, explicit conversions, resolved calls/fields); `src/opt/` optimizes the IR; `src/codegen/` emits NASM x86-64 purely from IR; `src/terminal/` handles terminal detection + ANSI colors; `src/jotc.c` drives `Lexer` → `Parser` → `SemAnalyze` → `ir_build` → `opt_run` → `GenerateAssembly`
 - IR: target-independent three-address code with enum opcodes (arithmetic, comparisons, conversions, loads/stores, jumps, calls, method dispatch, arrays, strings, instances, runtime builtins). `jotc --emit-ir file.jot` dumps it; it is internal and never part of the language
-- Optimization: independently callable passes — constant folding (never folds trapping integer ops or non-finite floats), constant/copy propagation, dead code elimination, unreachable block removal, algebraic identities (exact float ones only), branch/block comparison simplification, safe within-block load/store elimination, and local common-subexpression elimination (`-O2`). `-O0` runs no passes, `-O1` (default) runs the safe set. Every pass preserves traps and observable behavior: all 33 examples produce byte-identical output at `-O0`, `-O1`, and `-O2`
-- Backend: the x86-64 generator consumes IR only (no AST): flat operands in `rax`/`rbx`, `rbp`-relative frames, Windows x64 call frames, vtables for dynamic dispatch, and the same runtime traps. Register allocation and peephole selection are explicitly deferred — current `-O1` output is correct but straightforward (about 3% larger assembly than the previous AST backend, ~1.3x on a simple loop micro-benchmark)
-- Testing: `examples/` holds 33 runnable programs (including `examples/opt/` for folding, propagation, dead code, algebra, branches, calls, strings, floats, and control flow). Compiler build time is unchanged (about 0.7s for all examples, same as before the rewrite)
+- Optimization: independently callable passes — constant folding (never folds trapping integer ops or non-finite floats), constant/copy propagation, dead code elimination, unreachable block removal, algebraic identities (exact float ones only), branch/block comparison simplification, safe within-block load/store elimination, and local common-subexpression elimination (`-O2`). `-O0` runs no passes, `-O1` (default) runs the safe set. Every pass preserves traps and observable behavior: all 37 examples produce byte-identical output at `-O0`, `-O1`, and `-O2` on Windows, and at `-O1` on Linux
+- Backend: the x86-64 generator consumes IR only (no AST) through instruction selection parameterized by operand locations. `src/codegen/target.h`/`target.c` describe each target (argument registers, shadow space, caller/callee-saved classes, varargs rules, PLT calls); `src/codegen/regalloc.c` runs linear-scan allocation over real live intervals (caller-saved registers for short ranges, callee-saved with prologue saves across calls, frame-slot spills); `src/codegen/x86.c` selects register, immediate, and memory instruction forms; `src/codegen/codegen.c` drives per-function allocation and emission. No other architecture backends are claimed — the abstraction exists so they can plug in later
+- Register allocation: temps (not variables) are allocated; scratch (`rax`, `rbx`, `r10`, `r11`, `xmm0`-`xmm3`) is never allocated, and every runtime sequence clobbers only scratch plus argument registers it spilled first, so values in saved registers and spill slots survive calls
+- Testing: `examples/` holds 37 runnable programs (including `examples/opt/` for folding, propagation, dead code, algebra, branches, calls, strings, floats, control flow, and register pressure). A 76-case corpus checks diagnostics are byte-identical too. Compiler build time is unchanged (about 0.7s for all examples). Measured code: `-O1` assembly is about 6% larger than the previous backend across all examples, and a simple loop micro-benchmark runs about 1.1x as fast

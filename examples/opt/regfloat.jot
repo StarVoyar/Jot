@@ -1,0 +1,28 @@
+fn public fadd(num a, num b) -> num {
+  return(self.a + self.b);
+}
+
+fn public fmul(num a, num b) -> num {
+  return(self.a * self.b);
+}
+
+fn public main() {
+  num x = 1.5;
+  num y = fadd(x, 2.5) * fmul(x, 3.5);
+  print(y);
+  print("\n");
+  num i = 0;
+  num acc = 0.0;
+  while (i < 4) {
+    acc = acc + fadd(i * 1.5, i * 0.5);
+    i += 1;
+  }
+  print(acc);
+  print("\n");
+  num z = fmul(fadd(1.5, 2.5), fadd(3.5, 4.5));
+  print(z);
+  print("\n");
+  return(0);
+}
+
+main();

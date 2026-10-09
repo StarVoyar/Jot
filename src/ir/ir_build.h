@@ -11,7 +11,7 @@
 typedef struct {
   IrModule *m;
   IrFunc *f;
-  IrBlock *cur;
+  int cur; /**< Current block id (ids stay valid across reallocs) */
   SemVar *vars;
   int nvars;
   SemFunc *sfunc;
@@ -56,6 +56,13 @@ int irb_temp(BuildCtx *ctx, IrType t);
  * @return Emitted instruction
  */
 IrInstr *irb_emit(BuildCtx *ctx, IrInstr ins);
+
+/**
+ * @brief Returns the current emission block
+ * @param ctx Builder context
+ * @return Current block (looked up fresh, safe across reallocs)
+ */
+IrBlock *irb_cur(BuildCtx *ctx);
 
 /**
  * @brief Starts a new block and continues emission there

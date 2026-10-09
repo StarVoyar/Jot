@@ -1,0 +1,30 @@
+fn public one(num v) -> num {
+  return(self.v + 1);
+}
+
+fn public two(num v) -> num {
+  return(self.v * 2);
+}
+
+fn public add4(num a, num b, num c, num d) -> num {
+  return(self.a + self.b + self.c + self.d);
+}
+
+fn public main() {
+  print(add4(one(1), two(2), one(3), two(4)));
+  print("\n");
+  num x = one(two(one(two(5))));
+  print(x);
+  print("\n");
+  num i = 0;
+  num s = 0;
+  while (i < 5) {
+    s = s + one(i) * two(i);
+    i += 1;
+  }
+  print(s);
+  print("\n");
+  return(0);
+}
+
+main();
