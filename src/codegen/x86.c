@@ -675,6 +675,66 @@ static void emit_setcc(int cond, int dst_reg, int dst_slot) {
  * @brief Emits a comparison with 0/1 result
  * @param ins Comparison instruction
  */
+/**
+ * @brief Emits a string comparison, flags set from strcmp
+ * @param l Left operand
+ * @param r Right operand
+ */
+static void cmp_str_operands(Op l, Op r) {
+  load_rax(l);
+  fprintf(xo, "  push rax\n");
+  load_rax(r);
+  fprintf(xo, "  mov rbx, rax\n");
+  fprintf(xo, "  pop rax\n");
+  fprintf(xo, "  mov %s, rax\n", areg(0));
+  fprintf(xo, "  mov %s, rbx\n", areg(1));
+  gen_runtime_prologue();
+  extcall("strcmp");
+  gen_runtime_epilogue();
+  fprintf(xo, "  test eax, eax\n");
+}
+
+/**
+ * @brief Emits a float comparison, flags set from ucomisd
+ * @param l Left operand
+ * @param r Right operand
+ */
+static void cmp_float_operands(Op l, Op r) {
+  load_xmm(l, R_XMM0);
+  load_xmm(r, R_XMM1);
+  fprintf(xo, "  ucomisd xmm0, xmm1\n");
+}
+
+/**
+ * @brief Emits an integer comparison, flags set from cmp
+ * @param l Left operand
+ * @param r Right operand
+ */
+static void cmp_int_operands(Op l, Op r) {
+  if (l.is_reg) {
+    if (r.is_imm && imm32(r.imm)) {
+      fprintf(xo, "  cmp %s, %lld\n", reg_name(l.reg), r.imm);
+    } else if (r.is_mem) {
+      fprintf(xo, "  cmp %s, [rbp - %d]\n", reg_name(l.reg),
+              slot_off(r.slot));
+    } else if (r.is_global) {
+      fprintf(xo, "  cmp %s, [rel global_%s]\n", reg_name(l.reg),
+              xm->globals[r.gidx].name);
+    } else {
+      load_reg(r, R_RBX);
+      fprintf(xo, "  cmp %s, rbx\n", reg_name(l.reg));
+    }
+  } else {
+    load_rax(l);
+    if (r.is_imm && imm32(r.imm)) {
+      fprintf(xo, "  cmp rax, %lld\n", r.imm);
+    } else {
+      load_reg(r, R_RBX);
+      fprintf(xo, "  cmp rax, rbx\n");
+    }
+  }
+}
+
 static void sel_cmp(IrInstr *ins) {
   int ti = ins->dst - xf->nvars;
   int dst_reg =
@@ -684,17 +744,7 @@ static void sel_cmp(IrInstr *ins) {
   Op l = op_of(ins->v[0]);
   Op r = op_of(ins->v[1]);
   if (ins->type == IR_STR) {
-    load_rax(l);
-    fprintf(xo, "  push rax\n");
-    load_rax(r);
-    fprintf(xo, "  mov rbx, rax\n");
-    fprintf(xo, "  pop rax\n");
-    fprintf(xo, "  mov %s, rax\n", areg(0));
-    fprintf(xo, "  mov %s, rbx\n", areg(1));
-    gen_runtime_prologue();
-    extcall("strcmp");
-    gen_runtime_epilogue();
-    fprintf(xo, "  test eax, eax\n");
+    cmp_str_operands(l, r);
     if (dst_reg >= 0) {
       emit_setcc(ins->cond, dst_reg, 0);
     } else {
@@ -703,9 +753,7 @@ static void sel_cmp(IrInstr *ins) {
     return;
   }
   if (ins->type == IR_FLOAT) {
-    load_xmm(l, R_XMM0);
-    load_xmm(r, R_XMM1);
-    fprintf(xo, "  ucomisd xmm0, xmm1\n");
+    cmp_float_operands(l, r);
     if (ins->cond == IR_CEQ) {
       fprintf(xo, "  sete al\n");
       fprintf(xo, "  setnp bl\n");
@@ -735,33 +783,37 @@ static void sel_cmp(IrInstr *ins) {
     }
     return;
   }
-  if (l.is_reg) {
-    if (r.is_imm && imm32(r.imm)) {
-      fprintf(xo, "  cmp %s, %lld\n", reg_name(l.reg), r.imm);
-    } else if (r.is_mem) {
-      fprintf(xo, "  cmp %s, [rbp - %d]\n", reg_name(l.reg),
-              slot_off(r.slot));
-    } else if (r.is_global) {
-      fprintf(xo, "  cmp %s, [rel global_%s]\n", reg_name(l.reg),
-              xm->globals[r.gidx].name);
-    } else {
-      load_reg(r, R_RBX);
-      fprintf(xo, "  cmp %s, rbx\n", reg_name(l.reg));
-    }
-  } else {
-    load_rax(l);
-    if (r.is_imm && imm32(r.imm)) {
-      fprintf(xo, "  cmp rax, %lld\n", r.imm);
-    } else {
-      load_reg(r, R_RBX);
-      fprintf(xo, "  cmp rax, rbx\n");
-    }
-  }
+  cmp_int_operands(l, r);
   if (dst_reg >= 0) {
     emit_setcc(ins->cond, dst_reg, 0);
   } else {
     emit_setcc(ins->cond, -1, ins->dst);
   }
+}
+
+/**
+ * @brief Emits a fused compare-and-branch (no materialized boolean)
+ * @param fi Function index for labels
+ * @param cmp Comparison instruction
+ * @param br Branch instruction consuming the comparison
+ * @param next Layout-next block id (-1 when none)
+ */
+static void sense_int_jcc(int fi, int cond, int t, int f, int next);
+static void sense_float_jcc(int fi, int cond, int t, int f, int next);
+static int sel_fused(int fi, IrInstr *cmp, IrInstr *br, int next) {
+  Op l = op_of(cmp->v[0]);
+  Op r = op_of(cmp->v[1]);
+  if (cmp->type == IR_STR) {
+    cmp_str_operands(l, r);
+    sense_int_jcc(fi, cmp->cond, br->t, br->f, next);
+  } else if (cmp->type == IR_FLOAT) {
+    cmp_float_operands(l, r);
+    sense_float_jcc(fi, cmp->cond, br->t, br->f, next);
+  } else {
+    cmp_int_operands(l, r);
+    sense_int_jcc(fi, cmp->cond, br->t, br->f, next);
+  }
+  return 1;
 }
 
 /**
@@ -784,7 +836,112 @@ static const char *func_label(const char *name) {
 static void sel_call(IrInstr *ins, int is_method) {
   int first = is_method ? 1 : 0;
   int total = first + ins->nlist;
+  int nregs = total < xt->nargs_regs ? total : xt->nargs_regs;
+  /* Lean path: no operand lives in an argument register, so loading
+     registers directly cannot clobber a not-yet-read value. */
+  int lean = 1;
+  if (is_method) {
+    Op recv = op_of(ins->v[0]);
+    if (recv.is_reg) {
+      for (int r = 0; r < nregs; r++) {
+        if (recv.reg == xt->arg_regs[r]) {
+          lean = 0;
+          break;
+        }
+      }
+    }
+  }
+  for (int k = 0; k < ins->nlist && lean; k++) {
+    Op a = op_of(ins->list[k]);
+    if (a.is_reg) {
+      for (int r = 0; r < nregs; r++) {
+        if (a.reg == xt->arg_regs[r]) {
+          lean = 0;
+          break;
+        }
+      }
+    }
+  }
   int frame, i, rhome;
+  if (lean) {
+    int nstack = total > xt->nargs_regs ? total - xt->nargs_regs : 0;
+    if (xt->shadow != 0) {
+      frame = 32 + 8 * nstack;
+      if (frame % 16 != 0) {
+        frame += 8;
+      }
+      rhome = -1;
+      fprintf(xo, "  sub rsp, %d\n", frame);
+      if (is_method) {
+        load_reg(op_of(ins->v[0]), xt->arg_regs[0]);
+        fprintf(xo, "  test %s, %s\n", areg(0), areg(0));
+        fprintf(xo, "  jz null_trap\n");
+        i = 1;
+      } else {
+        i = 0;
+      }
+      for (int k = 0; k < ins->nlist; k++, i++) {
+        if (i < xt->nargs_regs) {
+          load_reg(op_of(ins->list[k]), xt->arg_regs[i]);
+        } else {
+          load_rax(op_of(ins->list[k]));
+          fprintf(xo, "  mov [rsp + %d], rax\n", 32 + 8 * (i - 4));
+        }
+      }
+    } else {
+      frame = 8 * nstack;
+      if (frame % 16 != 0) {
+        frame += 8;
+      }
+      rhome = -1;
+      if (frame > 0) {
+        fprintf(xo, "  sub rsp, %d\n", frame);
+      }
+      if (is_method) {
+        load_reg(op_of(ins->v[0]), xt->arg_regs[0]);
+        fprintf(xo, "  test %s, %s\n", areg(0), areg(0));
+        fprintf(xo, "  jz null_trap\n");
+        i = 1;
+      } else {
+        i = 0;
+      }
+      for (int k = 0; k < ins->nlist; k++, i++) {
+        if (i < xt->nargs_regs) {
+          load_reg(op_of(ins->list[k]), xt->arg_regs[i]);
+        } else {
+          load_rax(op_of(ins->list[k]));
+          fprintf(xo, "  mov [rsp + %d], rax\n", 8 * (i - 6));
+        }
+      }
+    }
+    if (is_method) {
+      fprintf(xo, "  mov rax, %s\n", areg(0));
+      fprintf(xo, "  mov rax, [rax - 8]\n");
+      fprintf(xo, "  lea r11, [rel jot_vtables]\n");
+      fprintf(xo, "  mov r11, [r11 + rax*8]\n");
+      fprintf(xo, "  mov rax, [r11 + %d]\n", ins->callee * 8);
+      fprintf(xo, "  call rax\n");
+    } else {
+      fprintf(xo, "  call %s\n", func_label(ins->name));
+    }
+    if (frame > 0) {
+      fprintf(xo, "  add rsp, %d\n", frame);
+    }
+    if (ins->dst >= 0) {
+      int ti = ins->dst - xf->nvars;
+      if (ti >= 0 && ti < xa->ntemps && xa->temps[ti].is_reg) {
+        int reg = xa->temps[ti].reg;
+        if (reg >= R_XMM0) {
+          fprintf(xo, "  movq %s, rax\n", reg_name(reg));
+        } else {
+          fprintf(xo, "  mov %s, rax\n", reg_name(reg));
+        }
+      } else {
+        store_slot(ins->dst);
+      }
+    }
+    return;
+  }
   if (xt->shadow != 0) {
     frame = 64 + 8 * (total > 4 ? total - 4 : 0);
     if (frame % 16 != 0) {
@@ -1277,11 +1434,13 @@ static void sel_arr_load(IrInstr *ins) {
   fprintf(xo, "  mov r10, [rsp]\n");
   fprintf(xo, "  test r10, r10\n");
   fprintf(xo, "  jz null_trap\n");
-  fprintf(xo, "  mov r11, [r10]\n");
-  fprintf(xo, "  cmp rax, 0\n");
-  fprintf(xo, "  jl index_trap\n");
-  fprintf(xo, "  cmp rax, r11\n");
-  fprintf(xo, "  jae index_trap\n");
+  if (ins->aux == 0) {
+    fprintf(xo, "  mov r11, [r10]\n");
+    fprintf(xo, "  cmp rax, 0\n");
+    fprintf(xo, "  jl index_trap\n");
+    fprintf(xo, "  cmp rax, r11\n");
+    fprintf(xo, "  jae index_trap\n");
+  }
   fprintf(xo, "  mov r10, [rsp]\n");
   fprintf(xo, "  mov rax, [r10 + rax*8 + 8]\n");
   fprintf(xo, "  add rsp, 8\n");
@@ -1511,7 +1670,161 @@ static void emit_restore(void) {
     }
   }
 }
-static void sel_instr(int fi, IrInstr *ins, int is_entry) {
+/**
+ * @brief Counts operand uses of a frame slot in a function
+ * @param slot Frame slot to count
+ * @return Use count across all blocks
+ */
+static int count_uses(int slot) {
+  int n = 0;
+  for (int b = 0; b < xf->nblocks; b++) {
+    for (int k = 0; k < xf->blocks[b].nins; k++) {
+      IrInstr *ins = &xf->blocks[b].ins[k];
+      if (ins->op == IR_NOP) {
+        continue;
+      }
+      for (int i = 0; i < ins->nv; i++) {
+        if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
+            ins->v[i].idx == slot) {
+          n++;
+        }
+      }
+      for (int i = 0; i < ins->nlist; i++) {
+        if ((ins->list[i].kind == IRV_TEMP ||
+             ins->list[i].kind == IRV_VAR) &&
+            ins->list[i].idx == slot) {
+          n++;
+        }
+      }
+    }
+  }
+  return n;
+}
+
+/**
+ * @brief Emits an integer conditional jump with fallthrough elision
+ * @param fi Function index for labels
+ * @param cond Comparison condition
+ * @param t True block, f false block, next layout-next block (-1 none)
+ */
+static void sense_int_jcc(int fi, int cond, int t, int f, int next) {
+  const char *jt = "je";
+  const char *jf = "jne";
+  if (cond == IR_CNE) {
+    jt = "jne";
+    jf = "je";
+  } else if (cond == IR_CLT) {
+    jt = "jl";
+    jf = "jge";
+  } else if (cond == IR_CGT) {
+    jt = "jg";
+    jf = "jle";
+  } else if (cond == IR_CLE) {
+    jt = "jle";
+    jf = "jg";
+  } else if (cond == IR_CGE) {
+    jt = "jge";
+    jf = "jl";
+  }
+  if (f == next) {
+    fprintf(xo, "  %s f%d_bb%d\n", jt, fi, t);
+  } else if (t == next) {
+    fprintf(xo, "  %s f%d_bb%d\n", jf, fi, f);
+  } else {
+    fprintf(xo, "  %s f%d_bb%d\n", jt, fi, t);
+    fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+  }
+}
+
+/**
+ * @brief Emits a NaN-safe float conditional jump with elision
+ * @param fi Function index for labels
+ * @param cond Comparison condition
+ * @param t True block, f false block, next layout-next block (-1 none)
+ * @details Unordered (NaN) inputs take the false edge except for !=.
+ * Each form below is checked against the ucomisd flag truth table
+ * (unordered sets ZF=PF=CF).
+ */
+static void sense_float_jcc(int fi, int cond, int t, int f, int next) {
+  if (cond == IR_CEQ) {
+    if (f == next) {
+      fprintf(xo, "  je f%d_bb%d\n", fi, t);
+    } else if (t == next) {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  jne f%d_bb%d\n", fi, f);
+    } else {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  je f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+    }
+    return;
+  }
+  if (cond == IR_CNE) {
+    if (t == next) {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, t);
+      fprintf(xo, "  je f%d_bb%d\n", fi, f);
+    } else if (f == next) {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jne f%d_bb%d\n", fi, t);
+    } else {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jne f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+    }
+    return;
+  }
+  if (cond == IR_CLT) {
+    if (f == next) {
+      fprintf(xo, "  jb f%d_bb%d\n", fi, t);
+    } else if (t == next) {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  jae f%d_bb%d\n", fi, f);
+    } else {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  jb f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+    }
+    return;
+  }
+  if (cond == IR_CGT) {
+    if (f == next) {
+      fprintf(xo, "  ja f%d_bb%d\n", fi, t);
+    } else if (t == next) {
+      fprintf(xo, "  jbe f%d_bb%d\n", fi, f);
+    } else {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  ja f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+    }
+    return;
+  }
+  if (cond == IR_CLE) {
+    if (f == next) {
+      fprintf(xo, "  jbe f%d_bb%d\n", fi, t);
+    } else if (t == next) {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  ja f%d_bb%d\n", fi, f);
+    } else {
+      fprintf(xo, "  jp f%d_bb%d\n", fi, f);
+      fprintf(xo, "  jbe f%d_bb%d\n", fi, t);
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+    }
+    return;
+  }
+  /* >= : unordered fails jae on its own. */
+  if (f == next) {
+    fprintf(xo, "  jae f%d_bb%d\n", fi, t);
+  } else if (t == next) {
+    fprintf(xo, "  jb f%d_bb%d\n", fi, f);
+  } else {
+    fprintf(xo, "  jae f%d_bb%d\n", fi, t);
+    fprintf(xo, "  jmp f%d_bb%d\n", fi, f);
+  }
+}
+
+static int sel_instr(int fi, int bi, int k, IrInstr *ins, int is_entry) {
+  IrBlock *blk = &xf->blocks[bi];
+  int next = (bi + 1 < xf->nblocks) ? xf->blocks[bi + 1].id : -1;
   switch (ins->op) {
   case IR_NOP:
     break;
@@ -1542,30 +1855,52 @@ static void sel_instr(int fi, IrInstr *ins, int is_entry) {
       sel_arith_int(ins);
     }
     break;
-  case IR_CMP:
+  case IR_CMP: {
+    /* Fuse an immediately following branch on a single-use result. */
+    if (k + 1 < blk->nins) {
+      IrInstr *nxt = &blk->ins[k + 1];
+      if (nxt->op == IR_BR && nxt->nv == 1 && nxt->v[0].kind == IRV_TEMP &&
+          nxt->v[0].idx == ins->dst && count_uses(ins->dst) == 1) {
+        return sel_fused(fi, ins, nxt, next);
+      }
+    }
     sel_cmp(ins);
     break;
+  }
   case IR_JUMP:
-  case IR_BR:
-    if (ins->op == IR_JUMP) {
+    if (ins->t != next) {
       fprintf(xo, "  jmp f%d_bb%d\n", fi, ins->t);
+    }
+    break;
+  case IR_BR: {
+    Op c = op_of(ins->v[0]);
+    if (c.is_reg) {
+      fprintf(xo, "  cmp %s, 0\n", reg_name(c.reg));
+    } else if (c.is_mem) {
+      fprintf(xo, "  cmp qword [rbp - %d], 0\n", slot_off(c.slot));
+    } else if (c.is_global) {
+      fprintf(xo, "  cmp qword [rel global_%s], 0\n",
+              xm->globals[c.gidx].name);
+    } else if (c.is_imm && c.imm == 0) {
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, ins->f);
+      break;
+    } else if (c.is_imm) {
+      fprintf(xo, "  jmp f%d_bb%d\n", fi, ins->t);
+      break;
     } else {
-      Op c = op_of(ins->v[0]);
-      if (c.is_reg) {
-        fprintf(xo, "  cmp %s, 0\n", reg_name(c.reg));
-      } else if (c.is_mem) {
-        fprintf(xo, "  cmp qword [rbp - %d], 0\n", slot_off(c.slot));
-      } else if (c.is_global) {
-        fprintf(xo, "  cmp qword [rel global_%s], 0\n",
-                xm->globals[c.gidx].name);
-      } else {
-        load_rax(c);
-        fprintf(xo, "  cmp rax, 0\n");
-      }
+      load_rax(c);
+      fprintf(xo, "  cmp rax, 0\n");
+    }
+    if (ins->f == next) {
+      fprintf(xo, "  jne f%d_bb%d\n", fi, ins->t);
+    } else if (ins->t == next) {
+      fprintf(xo, "  je f%d_bb%d\n", fi, ins->f);
+    } else {
       fprintf(xo, "  je f%d_bb%d\n", fi, ins->f);
       fprintf(xo, "  jmp f%d_bb%d\n", fi, ins->t);
     }
     break;
+  }
   case IR_CALL:
     sel_call(ins, 0);
     break;
@@ -1682,6 +2017,7 @@ static void sel_instr(int fi, IrInstr *ins, int is_entry) {
     sel_field_store(ins);
     break;
   }
+  return 0;
 }
 
 /**
@@ -1770,7 +2106,9 @@ void x86_emit_func(IrModule *m, IrFunc *f, int fi, int is_entry,
   for (int b = 0; b < f->nblocks; b++) {
     fprintf(out, "f%d_bb%d:\n", fi, f->blocks[b].id);
     for (int i = 0; i < f->blocks[b].nins; i++) {
-      sel_instr(fi, &f->blocks[b].ins[i], is_entry);
+      if (sel_instr(fi, b, i, &f->blocks[b].ins[i], is_entry)) {
+        i++;
+      }
     }
   }
   if (!is_entry) {

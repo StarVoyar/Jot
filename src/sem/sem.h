@@ -39,9 +39,6 @@ typedef enum {
 /** Maximum class definitions per program */
 #define SEM_MAX_CLASSES 64
 
-/** Maximum functions per program */
-#define SEM_MAX_FUNCS 256
-
 /** Maximum globals per program */
 #define SEM_MAX_GLOBALS 256
 
@@ -154,8 +151,9 @@ typedef struct {
  * @brief Whole-program semantic model feeding IR construction
  */
 typedef struct {
-  SemFunc funcs[SEM_MAX_FUNCS];         /**< Plain functions */
+  SemFunc *funcs;                       /**< Plain functions (grown) */
   int nfuncs;                           /**< Plain function count */
+  int capfuncs;                         /**< Allocated function capacity */
   SemGlobal globals[SEM_MAX_GLOBALS];   /**< Global variables */
   int nglobals;                         /**< Global count */
   SemStruct structs[SEM_MAX_STRUCTS];    /**< Struct definitions */

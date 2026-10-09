@@ -1,0 +1,20 @@
+fn public main() {
+  num x = 1;
+  x = 2;
+  print(x);
+  print("\n");
+  num y = 10;
+  y = 20;
+  y = y + 1;
+  print(y);
+  print("\n");
+  print(len("hello"));
+  print("\n");
+  str s = "a";
+  s = "b";
+  print(s);
+  print("\n");
+  return(0);
+}
+
+main();

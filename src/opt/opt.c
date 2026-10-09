@@ -427,6 +427,13 @@ static int fold_instr(IrModule *m, IrInstr *ins) {
       return make_const(ins, v);
     }
     return 0;
+  case IR_LEN:
+    /* String length of a constant cannot trap. */
+    if (ins->nv == 1 && ins->v[0].kind == IRV_STR) {
+      long long n = (long long)strlen(m->strings[ins->v[0].idx]);
+      return make_const(ins, ir_imm_i(n, IR_INT));
+    }
+    return 0;
   default:
     return 0;
   }

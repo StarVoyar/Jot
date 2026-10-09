@@ -282,12 +282,110 @@ static int clobbers_globals(IrOp op) {
   return op == IR_CALL || op == IR_CALLM;
 }
 
+/**
+ * @brief Tells whether a store target matches a load target
+ * @param store Store instruction (STORE or STOREG)
+ * @param is_global Receives non-zero for globals
+ * @return Target key (slot or negated global), -1 when not a plain store
+ */
+static int store_key(IrInstr *store, int *is_global) {
+  *is_global = 0;
+  if (store->nv != 2) {
+    return -1;
+  }
+  if (store->op == IR_STORE && store->v[0].kind == IRV_VAR) {
+    return store->v[0].idx;
+  }
+  if (store->op == IR_STOREG && store->v[0].kind == IRV_GLOBAL) {
+    *is_global = 1;
+    return -1000 - store->v[0].idx;
+  }
+  return -1;
+}
+
+/**
+ * @brief Tells whether an instruction reads a variable or global
+ * @param ins Instruction to inspect
+ * @param is_global Non-zero for globals
+ * @param key Target key (slot or negated global)
+ * @return Non-zero when any operand reads the target
+ */
+static int reads_target(IrInstr *ins, int is_global, int key) {
+  for (int i = 0; i < ins->nv; i++) {
+    if (!is_global && ins->v[i].kind == IRV_VAR && ins->v[i].idx == key) {
+      return 1;
+    }
+    if (is_global && ins->v[i].kind == IRV_GLOBAL &&
+        -1000 - ins->v[i].idx == key) {
+      return 1;
+    }
+  }
+  for (int i = 0; i < ins->nlist; i++) {
+    if (!is_global && ins->list[i].kind == IRV_VAR &&
+        ins->list[i].idx == key) {
+      return 1;
+    }
+    if (is_global && ins->list[i].kind == IRV_GLOBAL &&
+        -1000 - ins->list[i].idx == key) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * @brief Blanks stores overwritten before any read in a block
+ * @param blk Block to clean
+ * @return Non-zero when anything changed
+ * @details Straight-line only: a second store to the same target with no
+ * read between (and no call between for globals) makes the first dead.
+ */
+static int dead_stores(IrBlock *blk) {
+  int changed = 0;
+  for (int k = 0; k < blk->nins; k++) {
+    IrInstr *ins = &blk->ins[k];
+    if (ins->op != IR_STORE && ins->op != IR_STOREG) {
+      continue;
+    }
+    int is_global = 0;
+    int key = store_key(ins, &is_global);
+    if (key == -1) {
+      continue;
+    }
+    for (int j = k + 1; j < blk->nins; j++) {
+      IrInstr *later = &blk->ins[j];
+      if (later->op == IR_NOP) {
+        continue;
+      }
+      /* Any operand read keeps the store alive. */
+      if (reads_target(later, is_global, key)) {
+        break;
+      }
+      if (is_global && clobbers_globals(later->op)) {
+        break;
+      }
+      int later_global = 0;
+      if ((later->op == IR_STORE || later->op == IR_STOREG) &&
+          store_key(later, &later_global) == key &&
+          later_global == is_global) {
+        opt_blank(ins);
+        changed = 1;
+        break;
+      }
+    }
+  }
+  return changed;
+}
+
 int opt_loadstore(IrModule *m) {
   int changed = 0;
   for (int fi = 0; fi < m->nfuncs; fi++) {
     IrFunc *f = &m->funcs[fi];
     for (int b = 0; b < f->nblocks; b++) {
       IrBlock *blk = &f->blocks[b];
+      if (dead_stores(blk)) {
+        changed = 1;
+      }
       /* Known values: slot -> temp holding a fresh load. */
       int known_slot[512];
       int known_temp[512];

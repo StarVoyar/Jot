@@ -899,6 +899,8 @@ static void gen_for(BuildCtx *ctx, Node *node) {
   ld.v[0] = arr;
   ld.v[1] = ir_temp(idx_t, IR_INT);
   ld.nv = 2;
+  /* For-loop indices stay in bounds by construction. */
+  ld.aux = 1;
   irb_emit(ctx, ld);
   if (elem == ST_STRUCT || elem == ST_CLASS) {
     /* Null elements stay null, others bind by copy. */

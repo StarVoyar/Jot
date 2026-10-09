@@ -1,0 +1,71 @@
+fn public check(num v) -> num {
+  return(self.v);
+}
+
+fn public main() {
+  num a = 5;
+  num b = 5;
+  num c = 7;
+  if (a == b) { print(1); } else { print(0); }
+  if (a == c) { print(1); } else { print(0); }
+  if (a != b) { print(1); } else { print(0); }
+  if (a != c) { print(1); } else { print(0); }
+  if (a < c) { print(1); } else { print(0); }
+  if (c < a) { print(1); } else { print(0); }
+  if (c > a) { print(1); } else { print(0); }
+  if (a > c) { print(1); } else { print(0); }
+  if (a <= b) { print(1); } else { print(0); }
+  if (c <= a) { print(1); } else { print(0); }
+  if (c >= a) { print(1); } else { print(0); }
+  if (a >= c) { print(1); } else { print(0); }
+  print("\n");
+  num x = 1.5;
+  num y = 1.5;
+  num z = 2.5;
+  if (x == y) { print(1); } else { print(0); }
+  if (x == z) { print(1); } else { print(0); }
+  if (x != y) { print(1); } else { print(0); }
+  if (x != z) { print(1); } else { print(0); }
+  if (x < z) { print(1); } else { print(0); }
+  if (z < x) { print(1); } else { print(0); }
+  if (z > x) { print(1); } else { print(0); }
+  if (x > z) { print(1); } else { print(0); }
+  if (x <= y) { print(1); } else { print(0); }
+  if (z <= x) { print(1); } else { print(0); }
+  if (z >= x) { print(1); } else { print(0); }
+  if (x >= z) { print(1); } else { print(0); }
+  print("\n");
+  str s1 = "abc";
+  str s2 = "abc";
+  str s3 = "abd";
+  if (s1 == s2) { print(1); } else { print(0); }
+  if (s1 == s3) { print(1); } else { print(0); }
+  if (s1 != s2) { print(1); } else { print(0); }
+  if (s1 != s3) { print(1); } else { print(0); }
+  if (s1 < s3) { print(1); } else { print(0); }
+  if (s3 < s1) { print(1); } else { print(0); }
+  if (s3 > s1) { print(1); } else { print(0); }
+  if (s1 > s3) { print(1); } else { print(0); }
+  if (s1 <= s2) { print(1); } else { print(0); }
+  if (s3 <= s1) { print(1); } else { print(0); }
+  if (s3 >= s1) { print(1); } else { print(0); }
+  if (s1 >= s3) { print(1); } else { print(0); }
+  print("\n");
+  num nan = 0.0 / 0.0;
+  if (nan == nan) { print(1); } else { print(0); }
+  if (nan != nan) { print(1); } else { print(0); }
+  if (nan < 1.0) { print(1); } else { print(0); }
+  if (nan > 1.0) { print(1); } else { print(0); }
+  if (nan <= 1.0) { print(1); } else { print(0); }
+  if (nan >= 1.0) { print(1); } else { print(0); }
+  print("\n");
+  num w = 0;
+  while (w < 3) {
+    w += 1;
+  }
+  print(check(w));
+  print("\n");
+  return(0);
+}
+
+main();

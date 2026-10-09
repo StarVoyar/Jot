@@ -38,6 +38,198 @@ static SlotRec *srecs;
 static int nsrecs;
 static int capsrecs;
 
+/**
+ * @brief Open-addressing pointer map (append-only, first write wins)
+ * @details Backs the recorded-type and slot lookups so IR building
+ * stays linear instead of scanning ever-growing tables per node.
+ */
+typedef struct {
+  const Node **keys;
+  int *vals;
+  int cap;
+  int count;
+} PtrMap;
+
+static PtrMap tmap;
+static PtrMap smap;
+
+/**
+ * @brief Hashes a pointer for the pointer maps
+ * @param key Key pointer
+ * @return Mixed hash bits
+ */
+static size_t ptr_hash(const void *key) {
+  size_t h = (size_t)key;
+  h ^= h >> 16;
+  h *= (size_t)0x9e3779b1;
+  h ^= h >> 15;
+  return h;
+}
+
+/**
+ * @brief Hashes a string for the function map
+ * @param s String to hash
+ * @return djb2 hash
+ */
+static size_t str_hash(const char *s) {
+  size_t h = 5381;
+  while (*s != '\0') {
+    h = h * 33 + (unsigned char)*s;
+    s++;
+  }
+  return h;
+}
+
+/**
+ * @brief Grows a pointer map to fit more entries
+ * @param m Map to grow
+ * @param hash Hash function selecting slots
+ */
+static void ptrmap_grow(PtrMap *m, size_t (*hash)(const void *)) {
+  int old_cap = m->cap;
+  const Node **old_keys = m->keys;
+  int *old_vals = m->vals;
+  m->cap = old_cap != 0 ? old_cap * 2 : 256;
+  m->keys = calloc((size_t)m->cap, sizeof(const Node *));
+  m->vals = malloc((size_t)m->cap * sizeof(int));
+  for (int i = 0; i < m->cap; i++) {
+    m->vals[i] = -1;
+  }
+  for (int i = 0; i < old_cap; i++) {
+    if (old_keys[i] != NULL) {
+      size_t h = hash(old_keys[i]);
+      int j = (int)(h & (size_t)(m->cap - 1));
+      while (m->keys[j] != NULL) {
+        j = (j + 1) & (m->cap - 1);
+      }
+      m->keys[j] = old_keys[i];
+      m->vals[j] = old_vals[i];
+    }
+  }
+  free(old_keys);
+  free(old_vals);
+}
+
+/**
+ * @brief Looks a key up in a pointer map
+ * @param m Map to search
+ * @param key Key pointer
+ * @param hash Hash function selecting slots
+ * @return Stored value, or -1 when absent
+ */
+static int ptrmap_get(PtrMap *m, const void *key,
+                      size_t (*hash)(const void *)) {
+  if (m->cap == 0) {
+    return -1;
+  }
+  size_t h = hash(key);
+  int j = (int)(h & (size_t)(m->cap - 1));
+  while (m->keys[j] != NULL) {
+    if (m->keys[j] == key) {
+      return m->vals[j];
+    }
+    j = (j + 1) & (m->cap - 1);
+  }
+  return -1;
+}
+
+/**
+ * @brief Stores a key on first write (later writes are ignored)
+ * @param m Map to store into
+ * @param key Key pointer
+ * @param val Value to store
+ * @param hash Hash function selecting slots
+ */
+static void ptrmap_put(PtrMap *m, const void *key, int val,
+                       size_t (*hash)(const void *)) {
+  if (m->cap == 0 || m->count * 2 >= m->cap) {
+    ptrmap_grow(m, hash);
+  }
+  size_t h = hash(key);
+  int j = (int)(h & (size_t)(m->cap - 1));
+  while (m->keys[j] != NULL) {
+    if (m->keys[j] == key) {
+      return;
+    }
+    j = (j + 1) & (m->cap - 1);
+  }
+  m->keys[j] = key;
+  m->vals[j] = val;
+  m->count++;
+}
+
+/**
+ * @brief Open-addressing string map for function names
+ */
+typedef struct {
+  const char **keys;
+  int *vals;
+  int cap;
+  int count;
+} StrMap;
+
+static StrMap fnmap;
+
+/**
+ * @brief Looks a function name up
+ * @param name Function name
+ * @return Function index, or -1 when absent
+ */
+static int strmap_get(const char *name) {
+  if (fnmap.cap == 0) {
+    return -1;
+  }
+  size_t h = str_hash(name);
+  int j = (int)(h & (size_t)(fnmap.cap - 1));
+  while (fnmap.keys[j] != NULL) {
+    if (strcmp(fnmap.keys[j], name) == 0) {
+      return fnmap.vals[j];
+    }
+    j = (j + 1) & (fnmap.cap - 1);
+  }
+  return -1;
+}
+
+/**
+ * @brief Stores a function name (names are unique by construction)
+ * @param name Function name (borrowed, lives in the function record)
+ * @param idx Function index
+ */
+static void strmap_put(const char *name, int idx) {
+  if (fnmap.cap == 0 || fnmap.count * 2 >= fnmap.cap) {
+    int old_cap = fnmap.cap;
+    const char **old_keys = fnmap.keys;
+    int *old_vals = fnmap.vals;
+    fnmap.cap = old_cap != 0 ? old_cap * 2 : 256;
+    fnmap.keys = calloc((size_t)fnmap.cap, sizeof(const char *));
+    fnmap.vals = malloc((size_t)fnmap.cap * sizeof(int));
+    for (int i = 0; i < fnmap.cap; i++) {
+      fnmap.vals[i] = -1;
+    }
+    for (int i = 0; i < old_cap; i++) {
+      if (old_keys[i] != NULL) {
+        size_t h = str_hash(old_keys[i]);
+        int j = (int)(h & (size_t)(fnmap.cap - 1));
+        while (fnmap.keys[j] != NULL) {
+          j = (j + 1) & (fnmap.cap - 1);
+        }
+        fnmap.keys[j] = old_keys[i];
+        fnmap.vals[j] = old_vals[i];
+      }
+    }
+    free(old_keys);
+    free(old_vals);
+  }
+  size_t h = str_hash(name);
+  int j = (int)(h & (size_t)(fnmap.cap - 1));
+  while (fnmap.keys[j] != NULL) {
+    j = (j + 1) & (fnmap.cap - 1);
+  }
+  fnmap.keys[j] = name;
+  fnmap.vals[j] = idx;
+  fnmap.count++;
+}
+
 SemProg *sem_prog(void) { return &semprog; }
 
 const char *sem_type_name(SemType type) {
@@ -150,14 +342,7 @@ void sem_warn(Node *node, const char *format, ...) {
  * @param name Function name
  * @return Function index, or -1
  */
-static int find_func(const char *name) {
-  for (int i = 0; i < semprog.nfuncs; i++) {
-    if (strcmp(semprog.funcs[i].name, name) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
+static int find_func(const char *name) { return strmap_get(name); }
 
 int sem_func_at(const char *name) { return find_func(name); }
 
@@ -429,10 +614,8 @@ void sem_record_type(Node *node, SemType type, const char *kind) {
   if (node == NULL) {
     return;
   }
-  for (int i = 0; i < ntrecs; i++) {
-    if (trecs[i].node == node) {
-      return;
-    }
+  if (ptrmap_get(&tmap, node, ptr_hash) >= 0) {
+    return;
   }
   if (ntrecs >= captrecs) {
     captrecs = captrecs != 0 ? captrecs * 2 : 256;
@@ -441,42 +624,44 @@ void sem_record_type(Node *node, SemType type, const char *kind) {
   trecs[ntrecs].node = node;
   trecs[ntrecs].type = type;
   trecs[ntrecs].kind = kind;
+  ptrmap_put(&tmap, node, ntrecs, ptr_hash);
   ntrecs++;
 }
 
 SemType sem_expr_type(Node *node) {
-  for (int i = 0; i < ntrecs; i++) {
-    if (trecs[i].node == node) {
-      return trecs[i].type;
-    }
+  int idx = ptrmap_get(&tmap, node, ptr_hash);
+  if (idx >= 0) {
+    return trecs[idx].type;
   }
   return ST_ERR;
 }
 
 const char *sem_expr_kind(Node *node) {
-  for (int i = 0; i < ntrecs; i++) {
-    if (trecs[i].node == node) {
-      return trecs[i].kind;
-    }
+  int idx = ptrmap_get(&tmap, node, ptr_hash);
+  if (idx >= 0) {
+    return trecs[idx].kind;
   }
   return NULL;
 }
 
 void sem_record_slot(Node *decl, int slot) {
+  if (ptrmap_get(&smap, decl, ptr_hash) >= 0) {
+    return;
+  }
   if (nsrecs >= capsrecs) {
     capsrecs = capsrecs != 0 ? capsrecs * 2 : 256;
     srecs = realloc(srecs, (size_t)capsrecs * sizeof(SlotRec));
   }
   srecs[nsrecs].node = decl;
   srecs[nsrecs].slot = slot;
+  ptrmap_put(&smap, decl, nsrecs, ptr_hash);
   nsrecs++;
 }
 
 int sem_decl_slot(Node *decl) {
-  for (int i = 0; i < nsrecs; i++) {
-    if (srecs[i].node == decl) {
-      return srecs[i].slot;
-    }
+  int idx = ptrmap_get(&smap, decl, ptr_hash);
+  if (idx >= 0) {
+    return srecs[idx].slot;
   }
   return -1;
 }
@@ -569,7 +754,12 @@ void sem_check_unused(int from) {
  */
 static void collect_funcs(Node *root) {
   for (Node *s = root; s != NULL; s = s->right) {
-    if (s->type == NODE_FUNCTION && semprog.nfuncs < SEM_MAX_FUNCS) {
+    if (s->type == NODE_FUNCTION) {
+      if (semprog.nfuncs >= semprog.capfuncs) {
+        semprog.capfuncs = semprog.capfuncs != 0 ? semprog.capfuncs * 2 : 64;
+        semprog.funcs = realloc(semprog.funcs,
+                                (size_t)semprog.capfuncs * sizeof(SemFunc));
+      }
       SemFunc *f = &semprog.funcs[semprog.nfuncs];
       f->name = sem_dup(s->function.name);
       f->is_public = s->function.is_public;
@@ -591,6 +781,7 @@ static void collect_funcs(Node *root) {
       memset(f->pfloat, 0, sizeof(f->pfloat));
       f->nvars = 0;
       f->vars = NULL;
+      strmap_put(f->name, semprog.nfuncs);
       semprog.nfuncs++;
     }
   }
