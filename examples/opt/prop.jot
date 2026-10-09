@@ -1,0 +1,19 @@
+fn public main() {
+  num x = 5;
+  num y = x + 3;
+  print(y);
+  print("\n");
+  num z = y * 2;
+  print(z);
+  print("\n");
+  num w = z;
+  print(w + 1);
+  print("\n");
+  str s = "hi";
+  str t = s;
+  print(t + "!");
+  print("\n");
+  return(0);
+}
+
+main();

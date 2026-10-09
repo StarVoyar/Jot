@@ -1,0 +1,32 @@
+fn public main() {
+  num x = 41;
+  print(x + 0);
+  print("\n");
+  print(x * 1);
+  print("\n");
+  print(x - 0);
+  print("\n");
+  print(0 + x);
+  print("\n");
+  print(x - x);
+  print("\n");
+  print(x * 0);
+  print("\n");
+  print(x / 1);
+  print("\n");
+  print(x % 1);
+  print("\n");
+  num f = 2.5;
+  print(f * 1.0);
+  print("\n");
+  print(f / 1.0);
+  print("\n");
+  str s = "hey";
+  print("" + s);
+  print("\n");
+  print(s + "");
+  print("\n");
+  return(0);
+}
+
+main();

@@ -1,0 +1,20 @@
+fn public double(num v) -> num {
+  return(self.v * 2);
+}
+
+fn public add3(num a, num b, num c) -> num {
+  return(self.a + self.b + self.c);
+}
+
+fn public main() {
+  print(double(10 + 11));
+  print("\n");
+  print(add3(1, 2 * 3, 7 - 1));
+  print("\n");
+  num k = double(5) + double(6);
+  print(k);
+  print("\n");
+  return(0);
+}
+
+main();

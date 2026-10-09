@@ -1,0 +1,27 @@
+fn public main() {
+  print(10 + 20);
+  print("\n");
+  print(7 * 6 - 2);
+  print("\n");
+  print(100 / 4);
+  print("\n");
+  print(100 % 7);
+  print("\n");
+  print(1.5 * 2.0);
+  print("\n");
+  print(7.5 - 2.5);
+  print("\n");
+  if (3 * 3 == 9) {
+    print("nine");
+    print("\n");
+  }
+  if (1.5 + 1.5 == 3.0) {
+    print("three");
+    print("\n");
+  }
+  print("ab" + "cd");
+  print("\n");
+  return(0);
+}
+
+main();

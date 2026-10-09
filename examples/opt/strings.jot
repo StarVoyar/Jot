@@ -1,0 +1,18 @@
+fn public main() {
+  str a = "foo" + "bar";
+  print(a);
+  print("\n");
+  str b = a + "!";
+  print(b);
+  print("\n");
+  print(len("hello"));
+  print("\n");
+  print("n=" + tostr(42));
+  print("\n");
+  str who = "jot";
+  print("hi {who}!");
+  print("\n");
+  return(0);
+}
+
+main();

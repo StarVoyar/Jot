@@ -1,0 +1,22 @@
+fn public main() {
+  num live = 10 * 20;
+  num dead1 = 33 * 77;
+  num dead2 = live + dead1;
+  print(live);
+  print("\n");
+  if (1 == 2) {
+    print("gone");
+  }
+  print("kept");
+  print("\n");
+  num i = 0;
+  while (i < 3) {
+    num tmp = i * 100;
+    print(i);
+    i += 1;
+  }
+  print("\n");
+  return(0);
+}
+
+main();

@@ -1,0 +1,31 @@
+fn public main() {
+  if (1 == 1) {
+    print("yes");
+  } else {
+    print("no");
+  }
+  print("\n");
+  if (2 > 3) {
+    print("bad");
+  } else {
+    print("good");
+  }
+  print("\n");
+  num x = 10;
+  if (x == 10) {
+    if (x + 1 == 11) {
+      print("nested");
+      print("\n");
+    }
+  }
+  num n = 0;
+  if (n) {
+    print("truthy");
+  } else {
+    print("falsy");
+  }
+  print("\n");
+  return(0);
+}
+
+main();

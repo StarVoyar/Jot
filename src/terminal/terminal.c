@@ -1,15 +1,14 @@
 #include "terminal.h"
-
-/* Declared in lexer.h (not included: windows.h clashes with TokenType) */
-const char *lexer_source_line(int line, int *out_len);
-const char *lexer_source_line_in(const char *file, int line, int *out_len);
-
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
 #else
 #include <unistd.h>
 #endif
+
+/* Declared in lexer.h (not included: windows.h clashes with TokenType) */
+const char *lexer_source_line(int line, int *out_len);
+const char *lexer_source_line_in(const char *file, int line, int *out_len);
 
 /**
  * @brief Enables ANSI colors if stdout is a terminal

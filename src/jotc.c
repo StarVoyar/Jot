@@ -1,8 +1,11 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "codegen/codegen.h"
+#include "ir/ir.h"
 #include "lexer/lexer.h"
+#include "opt/opt.h"
 #include "parser/parser.h"
+#include "sem/sem.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -138,17 +141,33 @@ static char *default_out_path(const char *input) {
 
 int main(int argc, char *argv[]) {
   if (argc < 2 || strcmp(argv[1], "--help") == 0) {
-    printf("Usage: %s <file.jot> [-o output] [--debug]\n", argv[0]);
+    printf("Usage: %s <file.jot> [-o output] [--debug] [-O0|-O1|-O2] "
+           "[--emit-ir]\n",
+           argv[0]);
     printf("  -o output    Output file (e.g., main.exe, main.o, or main)\n");
     printf("  --debug      Print tokens, AST, and assembly path\n");
+    printf("  -O0          Straightforward code, no optimization passes\n");
+    printf("  -O1          Safe basic optimizations (default)\n");
+    printf("  -O2          O1 plus local common-subexpression elimination\n");
+    printf("  --emit-ir    Print the optimized IR and stop (no assembly)\n");
     return 1;
   }
 
   int debug = 0;
+  int emit_ir = 0;
+  OptLevel level = OPT_O1;
   const char *out_arg = NULL;
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--debug") == 0) {
       debug = 1;
+    } else if (strcmp(argv[i], "--emit-ir") == 0) {
+      emit_ir = 1;
+    } else if (strcmp(argv[i], "-O0") == 0) {
+      level = OPT_O0;
+    } else if (strcmp(argv[i], "-O1") == 0) {
+      level = OPT_O1;
+    } else if (strcmp(argv[i], "-O2") == 0) {
+      level = OPT_O2;
     } else if (strcmp(argv[i], "-o") == 0) {
       if (i + 1 < argc) {
         out_arg = argv[i + 1];
@@ -160,7 +179,9 @@ int main(int argc, char *argv[]) {
     } else if (out_arg == NULL) {
       out_arg = argv[i];
     } else {
-      printf("Usage: %s <file.jot> [-o output] [--debug]\n", argv[0]);
+      printf("Usage: %s <file.jot> [-o output] [--debug] [-O0|-O1|-O2] "
+             "[--emit-ir]\n",
+             argv[0]);
       return 1;
     }
   }
@@ -196,6 +217,17 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  if (SemAnalyze(ast, argv[1])) {
+    return 1;
+  }
+
+  IrModule *mod = ir_build(ast);
+  opt_run(mod, level);
+  if (emit_ir) {
+    ir_dump(mod, stdout);
+    return term_errors() > 0 ? 1 : 0;
+  }
+
   if (out_arg != NULL) {
     out_file = out_arg;
     out_dir = extract_dir(out_arg);
@@ -221,7 +253,7 @@ int main(int argc, char *argv[]) {
         "Output file '%s' already exists and will be overwritten\n", out_file);
   }
 
-  GenerateAssembly(ast, argv[1], out_file);
+  GenerateAssembly(mod, argv[1], out_file);
   if (term_errors() > 0) {
     /* Codegen diagnostics already printed: drop the partial asm, stop. */
     remove(out_file);

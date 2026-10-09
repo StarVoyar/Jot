@@ -1,0 +1,41 @@
+fn public main() {
+  num total = 0;
+  num i = 0;
+  while (i < 10) {
+    i += 1;
+    if (i == 3) {
+      continue;
+    }
+    if (i > 6) {
+      break;
+    }
+    total += i * 2;
+  }
+  print(total);
+  print("\n");
+  arr nums = [1, 2, 3, 4];
+  num s = 0;
+  for (n in nums) {
+    if (n == 2) {
+      continue;
+    }
+    s += n;
+  }
+  print(s);
+  print("\n");
+  num g = 0;
+  if (1 < 2) {
+    if (2 < 3) {
+      g = 99;
+    } else {
+      g = 1;
+    }
+  } else {
+    g = 2;
+  }
+  print(g);
+  print("\n");
+  return(0);
+}
+
+main();

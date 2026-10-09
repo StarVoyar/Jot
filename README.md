@@ -1,10 +1,10 @@
 # Jot
 
-A compiled programming language written in C. `jotc` lexes, parses, and generates NASM x86-64 assembly, then assembles and links it into a runnable program.
+A compiled programming language written in C. `jotc` lexes, parses, semantically analyzes, lowers to a typed three-address IR, optimizes, and generates NASM x86-64 assembly, then assembles and links it into a runnable program.
 
 ## Current Status
 
-Working end-to-end compiler: lexer (tokens) → parser (AST) → codegen (`.asm` in `build/bin/generated/`) → `nasm` + `gcc` → executable. Verified on Windows (`win64`); Unix targets `elf64`.
+Working end-to-end compiler: lexer (tokens) → parser (AST) → semantic analysis → Jot IR → optimization (`-O0`/`-O1`/`-O2`) → x86-64 backend (`.asm` in `build/bin/generated/`) → `nasm` + `gcc` → executable. Verified on Windows (`win64`); Unix targets `elf64`.
 
 ## Language Features
 
@@ -30,7 +30,7 @@ Working end-to-end compiler: lexer (tokens) → parser (AST) → codegen (`.asm`
 - **Input**: `input()` reads an integer from stdin, `input("Age: ")` prints the string prompt first (Python-style, no trailing newline, flushed before blocking). `input` is reserved and takes at most 1 string argument. Non-integer input aborts with `invalid input: expected integer`. `len(s)` returns the num length of a string (exactly 1 string argument)
 - **Return**: `return(v);` returns a value from a function (typed by the declared return type; missing types fall back to what the returns actually contain), `return;` returns from a `-> void` function, and a top-level `return(v);` exits the process with code `v`
 - **Comments**: Single-line comments (`//`)
-- **Diagnostics**: clang-style errors (red `Error:`, `file:line:col`, source snippet, `^` / red `~~~`) and yellow `Warning:` (unreachable code, missing visibility, redundant imports, shadowing — params, fields by params, locals — unused locals). **The compiler never stops at the first problem**: the parser and code generator recover from each faulty statement and keep going, so every error and warning in the file prints before `jotc` exits with status 1. **Any error means nothing is compiled** — no assembly is written (a partial file is deleted), so warnings still build while errors do not. Diagnostics in imported files point at that file, not the entry file. Error coverage: string misuse (indexing non-strings, non-numeric index, `len` arity/type, mixed concat/compare, arithmetic on strings, `-=` on strings), structs/classes (duplicates, unknown types/fields/methods, `new` arity/type errors, methods in structs, member visibility modifiers, bare or imported method calls, bad method returns, iterating/printing instances, reserved `this`), inheritance (unknown base class, a class inheriting itself, inheritance cycles, subclass passed where an unrelated class is expected — overrides with different parameters only warn), `input` misuse (arity, non-string prompt), `break`/`continue` outside a loop, `null` used with anything but `==`/`!=`, return misuse (bare `return;` outside `-> void`, a value returned from `-> void`, using a void call's result), bad char literals, duplicate globals, and builtin misuse (`toStr`, `toNum`, `readFile`, `writeFile` arity/type). A missing delimiter points where the token belongs when the offender starts a new line, otherwise at the offender like gcc
+- **Diagnostics**: clang-style errors (red `Error:`, `file:line:col`, source snippet, `^` / red `~~~`) and yellow `Warning:` (unreachable code, missing visibility, redundant imports, shadowing — params, fields by params, locals — unused locals). **The compiler never stops at the first problem**: the parser and semantic analyzer recover from each faulty statement and keep going, so every error and warning in the file prints before `jotc` exits with status 1. **Any error means nothing is compiled** — no assembly is written (a partial file is deleted), so warnings still build while errors do not. Diagnostics in imported files point at that file, not the entry file. Error coverage: string misuse (indexing non-strings, non-numeric index, `len` arity/type, mixed concat/compare, arithmetic on strings, `-=` on strings), structs/classes (duplicates, unknown types/fields/methods, `new` arity/type errors, methods in structs, member visibility modifiers, bare or imported method calls, bad method returns, iterating/printing instances, reserved `this`), inheritance (unknown base class, a class inheriting itself, inheritance cycles, subclass passed where an unrelated class is expected — overrides with different parameters only warn), `input` misuse (arity, non-string prompt), `break`/`continue` outside a loop, `null` used with anything but `==`/`!=`, return misuse (bare `return;` outside `-> void`, a value returned from `-> void`, using a void call's result), bad char literals, duplicate globals, and builtin misuse (`toStr`, `toNum`, `readFile`, `writeFile` arity/type). A missing delimiter points where the token belongs when the offender starts a new line, otherwise at the offender like gcc
 - **Runtime checks**: signed arithmetic with integer-overflow, division-by-zero, and stack-overflow traps, plus string index out of bounds, out of memory, and null instance access (message plus exit code 3)
 
 ## Building
@@ -55,10 +55,12 @@ Targets: `build` compiles `src/**/*.c`, `link` links `build/bin/jotc`, `debug` d
 ## Usage
 
 ```bash
-./build/bin/jotc <file.jot> [-o output] [--debug]
+./build/bin/jotc <file.jot> [-o output] [--debug] [-O0|-O1|-O2] [--emit-ir]
 ```
 
 The `-o` flag specifies the output file (e.g., `main.exe`, `main.o`, or `main`). The compiler validates that the output directory exists and warns if the file already exists. Without `-o`, the assembly goes to `build/bin/generated/<name>.asm`. Without `--debug` only errors/warnings print. Exit status is `1` when anything failed to compile, `0` otherwise (warnings still compile).
+
+Compiler options: `-O0` emits straightforward unoptimized code, `-O1` (default) enables safe basic optimizations, `-O2` adds local common-subexpression elimination. `--emit-ir` prints the optimized three-address IR to stdout and stops without writing assembly.
 
 ## Example
 
@@ -219,9 +221,8 @@ while (i < 10) {
 ## Implementation
 
 - Written in C (`-Wall -Wextra` clean)
-- Fast generated code: leaf expressions and immediate operands compile straight into registers (no stack round-trips), assignments collapse to read-modify-write instructions when safe, and float promotion happens at typed boundaries only — micro-benchmarks run within ~1.1-1.2x of equivalent C built with default `gcc` (no optimization flags)
-- `src/lexer/` — tokenizes source (`line`/`col` on every token)
-- `src/parser/` — recursive descent to AST, statements chained via `right`
-- `src/codegen/` — AST to NASM (stack-machine expressions, `rbp`-relative locals, `labelN`/`loopN` jumps, `printf`/`exit` runtime)
-- `src/terminal/` — terminal detection + ANSI colors for diagnostics
-- `src/jotc.c` — driver: `Lexer` → `Parser` → `GenerateAssembly`
+- Pipeline: `src/lexer/` tokenizes source (`line`/`col` on every token); `src/parser/` parses (recursive descent to AST, statements chained via `right`, plus import merging and call validation); `src/sem/` resolves meaning (symbols, types, fields, methods, inheritance, conversions, returns — diagnostics keep their messages and locations); `src/ir/` lowers the checked program to typed three-address IR (basic blocks, explicit conversions, resolved calls/fields); `src/opt/` optimizes the IR; `src/codegen/` emits NASM x86-64 purely from IR; `src/terminal/` handles terminal detection + ANSI colors; `src/jotc.c` drives `Lexer` → `Parser` → `SemAnalyze` → `ir_build` → `opt_run` → `GenerateAssembly`
+- IR: target-independent three-address code with enum opcodes (arithmetic, comparisons, conversions, loads/stores, jumps, calls, method dispatch, arrays, strings, instances, runtime builtins). `jotc --emit-ir file.jot` dumps it; it is internal and never part of the language
+- Optimization: independently callable passes — constant folding (never folds trapping integer ops or non-finite floats), constant/copy propagation, dead code elimination, unreachable block removal, algebraic identities (exact float ones only), branch/block comparison simplification, safe within-block load/store elimination, and local common-subexpression elimination (`-O2`). `-O0` runs no passes, `-O1` (default) runs the safe set. Every pass preserves traps and observable behavior: all 33 examples produce byte-identical output at `-O0`, `-O1`, and `-O2`
+- Backend: the x86-64 generator consumes IR only (no AST): flat operands in `rax`/`rbx`, `rbp`-relative frames, Windows x64 call frames, vtables for dynamic dispatch, and the same runtime traps. Register allocation and peephole selection are explicitly deferred — current `-O1` output is correct but straightforward (about 3% larger assembly than the previous AST backend, ~1.3x on a simple loop micro-benchmark)
+- Testing: `examples/` holds 33 runnable programs (including `examples/opt/` for folding, propagation, dead code, algebra, branches, calls, strings, floats, and control flow). Compiler build time is unchanged (about 0.7s for all examples, same as before the rewrite)

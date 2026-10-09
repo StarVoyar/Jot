@@ -1,0 +1,25 @@
+fn public main() {
+  num a = 1.5 + 2.5;
+  print(a);
+  print("\n");
+  num b = a * 2;
+  print(b);
+  print("\n");
+  num c = 7;
+  c = c * 1.5;
+  print(c);
+  print("\n");
+  num d = 10;
+  d += 0.5;
+  print(d);
+  print("\n");
+  print(1.0 / 0.0);
+  print("\n");
+  if (0.5 < 1.5) {
+    print("lt");
+    print("\n");
+  }
+  return(0);
+}
+
+main();
