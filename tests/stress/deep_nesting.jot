@@ -1,0 +1,52 @@
+// Stress: deep block nesting (40 ifs) plus a long arithmetic chain.
+fn public main() {
+  num x = 1;
+  if (x == 1) {
+    if (x == 1) {
+      if (x == 1) {
+        if (x == 1) {
+          if (x == 1) {
+            if (x == 1) {
+              if (x == 1) {
+                if (x == 1) {
+                  if (x == 1) {
+                    if (x == 1) {
+                      if (x == 1) {
+                        if (x == 1) {
+                          if (x == 1) {
+                            if (x == 1) {
+                              if (x == 1) {
+                                if (x == 1) {
+                                  if (x == 1) {
+                                    if (x == 1) {
+                                      if (x == 1) {
+                                        if (x == 1) {
+                                          x = x + 1;
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  num y = x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x;
+  y = y * 2 - x + 100 - 50 + 25 - 12 + 6 - 3 + 1;
+  print(y);
+  print("\n");
+  return(0);
+}
+
+main();

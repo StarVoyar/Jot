@@ -1,0 +1,5 @@
+# Keep shell runners executable and sources byte-stable across platforms:
+# CRLF in run_unix.sh breaks `sh` on Linux, and CRLF in .jot sources would
+# churn --emit-ir/--emit-asm output. C sources stay plain text.
+*.sh text eol=lf
+*.jot text eol=lf

@@ -1,7 +1,7 @@
 # Jot compiler test runner (Windows).
-# Builds jotc, then checks every examples/**/*.jot produces byte-identical
-# output at -O0, -O1 and -O2, plus CLI smoke tests. No checked-in baselines:
-# the three optimization levels must agree with each other.
+# Builds jotc, then checks every examples/**/*.jot and tests/stress/*.jot
+# produces byte-identical output at -O0, -O1 and -O2, plus CLI smoke tests.
+# No checked-in baselines: the three optimization levels must agree.
 # Usage: powershell -File tests/run_win.ps1  (run from the repo root)
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -16,7 +16,9 @@ $tmp = Join-Path $env:TEMP "jot_test_win"
 New-Item -ItemType Directory -Path $tmp -Force >$null
 $pass = 0; $fail = 0
 
-$files = Get-ChildItem -Recurse (Join-Path $root "examples") -Filter *.jot
+$files = @()
+$files += Get-ChildItem -Recurse (Join-Path $root "examples") -Filter *.jot
+$files += Get-ChildItem (Join-Path $root "tests/stress") -Filter *.jot
 foreach ($f in $files) {
   $tag = $f.Directory.Name + "/" + $f.BaseName
   $outs = @()
@@ -28,15 +30,18 @@ foreach ($f in $files) {
     $exe = Join-Path $tmp ("t_" + $f.BaseName + "_" + $opt + ".exe")
     Push-Location $f.DirectoryName
     & $jotc $f.FullName $asm $opt >$null 2>$null
-    if ($LASTEXITCODE -ne 0) { $ok = $false; break }
-    & nasm -f win64 $asm -o $obj >$null 2>&1
-    if ($LASTEXITCODE -ne 0) { $ok = $false; break }
-    & gcc $obj -o $exe >$null 2>&1
-    if ($LASTEXITCODE -ne 0) { $ok = $false; break }
-    $o = "42`nhello`n" | & $exe 2>$null | Out-String
-    $codes += $LASTEXITCODE
-    $outs += $(if ($o -ne $null) { $o -replace "`r`n", "`n" } else { "" })
+    $cc = $LASTEXITCODE
+    if ($cc -eq 0) { & nasm -f win64 $asm -o $obj >$null 2>&1; $cc = $LASTEXITCODE }
+    if ($cc -eq 0) { & gcc $obj -o $exe >$null 2>&1; $cc = $LASTEXITCODE }
+    if ($cc -eq 0) {
+      $o = "42`nhello`n" | & $exe 2>$null | Out-String
+      $codes += $LASTEXITCODE
+      $outs += $(if ($o -ne $null) { $o -replace "`r`n", "`n" } else { "" })
+    } else {
+      $ok = $false
+    }
     Pop-Location
+    if (-not $ok) { break }
   }
   if ($ok -and $outs[0] -ceq $outs[1] -and $outs[0] -ceq $outs[2] -and $codes[0] -eq $codes[1] -and $codes[0] -eq $codes[2]) {
     $pass++

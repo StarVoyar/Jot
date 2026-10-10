@@ -1,8 +1,8 @@
 #!/bin/sh
 # Jot compiler test runner (Linux/macOS).
-# Builds jotc, then checks every examples/**/*.jot produces byte-identical
-# output at -O0, -O1 and -O2, plus CLI smoke tests. No checked-in baselines:
-# the three optimization levels must agree with each other.
+# Builds jotc, then checks every examples/**/*.jot and tests/stress/*.jot
+# produces byte-identical output at -O0, -O1 and -O2, plus CLI smoke tests.
+# No checked-in baselines: the three optimization levels must agree.
 # Usage: sh tests/run_unix.sh  (run from the repo root)
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -12,7 +12,7 @@ JOTC="build/bin/jotc"
 TMP="${TMPDIR:-/tmp}/jot_test_unix"
 mkdir -p "$TMP"
 PASS=0; FAIL=0
-for f in examples/*/*.jot; do
+for f in examples/*/*.jot tests/stress/*.jot; do
   d=$(dirname "$f"); b=$(basename "$f" .jot)
   tag="$d/$b"
   ok=1; o0=""; o1=""; o2=""; c0=""; c1=""; c2=""

@@ -1,0 +1,1208 @@
+// Stress: 300 functions chain-called (exercises dynamic function table past 256).
+fn public f1() -> num {
+  return(1);
+}
+fn public f2() -> num {
+  return(2);
+}
+fn public f3() -> num {
+  return(3);
+}
+fn public f4() -> num {
+  return(4);
+}
+fn public f5() -> num {
+  return(5);
+}
+fn public f6() -> num {
+  return(6);
+}
+fn public f7() -> num {
+  return(7);
+}
+fn public f8() -> num {
+  return(8);
+}
+fn public f9() -> num {
+  return(9);
+}
+fn public f10() -> num {
+  return(10);
+}
+fn public f11() -> num {
+  return(11);
+}
+fn public f12() -> num {
+  return(12);
+}
+fn public f13() -> num {
+  return(13);
+}
+fn public f14() -> num {
+  return(14);
+}
+fn public f15() -> num {
+  return(15);
+}
+fn public f16() -> num {
+  return(16);
+}
+fn public f17() -> num {
+  return(17);
+}
+fn public f18() -> num {
+  return(18);
+}
+fn public f19() -> num {
+  return(19);
+}
+fn public f20() -> num {
+  return(20);
+}
+fn public f21() -> num {
+  return(21);
+}
+fn public f22() -> num {
+  return(22);
+}
+fn public f23() -> num {
+  return(23);
+}
+fn public f24() -> num {
+  return(24);
+}
+fn public f25() -> num {
+  return(25);
+}
+fn public f26() -> num {
+  return(26);
+}
+fn public f27() -> num {
+  return(27);
+}
+fn public f28() -> num {
+  return(28);
+}
+fn public f29() -> num {
+  return(29);
+}
+fn public f30() -> num {
+  return(30);
+}
+fn public f31() -> num {
+  return(31);
+}
+fn public f32() -> num {
+  return(32);
+}
+fn public f33() -> num {
+  return(33);
+}
+fn public f34() -> num {
+  return(34);
+}
+fn public f35() -> num {
+  return(35);
+}
+fn public f36() -> num {
+  return(36);
+}
+fn public f37() -> num {
+  return(37);
+}
+fn public f38() -> num {
+  return(38);
+}
+fn public f39() -> num {
+  return(39);
+}
+fn public f40() -> num {
+  return(40);
+}
+fn public f41() -> num {
+  return(41);
+}
+fn public f42() -> num {
+  return(42);
+}
+fn public f43() -> num {
+  return(43);
+}
+fn public f44() -> num {
+  return(44);
+}
+fn public f45() -> num {
+  return(45);
+}
+fn public f46() -> num {
+  return(46);
+}
+fn public f47() -> num {
+  return(47);
+}
+fn public f48() -> num {
+  return(48);
+}
+fn public f49() -> num {
+  return(49);
+}
+fn public f50() -> num {
+  return(50);
+}
+fn public f51() -> num {
+  return(51);
+}
+fn public f52() -> num {
+  return(52);
+}
+fn public f53() -> num {
+  return(53);
+}
+fn public f54() -> num {
+  return(54);
+}
+fn public f55() -> num {
+  return(55);
+}
+fn public f56() -> num {
+  return(56);
+}
+fn public f57() -> num {
+  return(57);
+}
+fn public f58() -> num {
+  return(58);
+}
+fn public f59() -> num {
+  return(59);
+}
+fn public f60() -> num {
+  return(60);
+}
+fn public f61() -> num {
+  return(61);
+}
+fn public f62() -> num {
+  return(62);
+}
+fn public f63() -> num {
+  return(63);
+}
+fn public f64() -> num {
+  return(64);
+}
+fn public f65() -> num {
+  return(65);
+}
+fn public f66() -> num {
+  return(66);
+}
+fn public f67() -> num {
+  return(67);
+}
+fn public f68() -> num {
+  return(68);
+}
+fn public f69() -> num {
+  return(69);
+}
+fn public f70() -> num {
+  return(70);
+}
+fn public f71() -> num {
+  return(71);
+}
+fn public f72() -> num {
+  return(72);
+}
+fn public f73() -> num {
+  return(73);
+}
+fn public f74() -> num {
+  return(74);
+}
+fn public f75() -> num {
+  return(75);
+}
+fn public f76() -> num {
+  return(76);
+}
+fn public f77() -> num {
+  return(77);
+}
+fn public f78() -> num {
+  return(78);
+}
+fn public f79() -> num {
+  return(79);
+}
+fn public f80() -> num {
+  return(80);
+}
+fn public f81() -> num {
+  return(81);
+}
+fn public f82() -> num {
+  return(82);
+}
+fn public f83() -> num {
+  return(83);
+}
+fn public f84() -> num {
+  return(84);
+}
+fn public f85() -> num {
+  return(85);
+}
+fn public f86() -> num {
+  return(86);
+}
+fn public f87() -> num {
+  return(87);
+}
+fn public f88() -> num {
+  return(88);
+}
+fn public f89() -> num {
+  return(89);
+}
+fn public f90() -> num {
+  return(90);
+}
+fn public f91() -> num {
+  return(91);
+}
+fn public f92() -> num {
+  return(92);
+}
+fn public f93() -> num {
+  return(93);
+}
+fn public f94() -> num {
+  return(94);
+}
+fn public f95() -> num {
+  return(95);
+}
+fn public f96() -> num {
+  return(96);
+}
+fn public f97() -> num {
+  return(97);
+}
+fn public f98() -> num {
+  return(98);
+}
+fn public f99() -> num {
+  return(99);
+}
+fn public f100() -> num {
+  return(100);
+}
+fn public f101() -> num {
+  return(101);
+}
+fn public f102() -> num {
+  return(102);
+}
+fn public f103() -> num {
+  return(103);
+}
+fn public f104() -> num {
+  return(104);
+}
+fn public f105() -> num {
+  return(105);
+}
+fn public f106() -> num {
+  return(106);
+}
+fn public f107() -> num {
+  return(107);
+}
+fn public f108() -> num {
+  return(108);
+}
+fn public f109() -> num {
+  return(109);
+}
+fn public f110() -> num {
+  return(110);
+}
+fn public f111() -> num {
+  return(111);
+}
+fn public f112() -> num {
+  return(112);
+}
+fn public f113() -> num {
+  return(113);
+}
+fn public f114() -> num {
+  return(114);
+}
+fn public f115() -> num {
+  return(115);
+}
+fn public f116() -> num {
+  return(116);
+}
+fn public f117() -> num {
+  return(117);
+}
+fn public f118() -> num {
+  return(118);
+}
+fn public f119() -> num {
+  return(119);
+}
+fn public f120() -> num {
+  return(120);
+}
+fn public f121() -> num {
+  return(121);
+}
+fn public f122() -> num {
+  return(122);
+}
+fn public f123() -> num {
+  return(123);
+}
+fn public f124() -> num {
+  return(124);
+}
+fn public f125() -> num {
+  return(125);
+}
+fn public f126() -> num {
+  return(126);
+}
+fn public f127() -> num {
+  return(127);
+}
+fn public f128() -> num {
+  return(128);
+}
+fn public f129() -> num {
+  return(129);
+}
+fn public f130() -> num {
+  return(130);
+}
+fn public f131() -> num {
+  return(131);
+}
+fn public f132() -> num {
+  return(132);
+}
+fn public f133() -> num {
+  return(133);
+}
+fn public f134() -> num {
+  return(134);
+}
+fn public f135() -> num {
+  return(135);
+}
+fn public f136() -> num {
+  return(136);
+}
+fn public f137() -> num {
+  return(137);
+}
+fn public f138() -> num {
+  return(138);
+}
+fn public f139() -> num {
+  return(139);
+}
+fn public f140() -> num {
+  return(140);
+}
+fn public f141() -> num {
+  return(141);
+}
+fn public f142() -> num {
+  return(142);
+}
+fn public f143() -> num {
+  return(143);
+}
+fn public f144() -> num {
+  return(144);
+}
+fn public f145() -> num {
+  return(145);
+}
+fn public f146() -> num {
+  return(146);
+}
+fn public f147() -> num {
+  return(147);
+}
+fn public f148() -> num {
+  return(148);
+}
+fn public f149() -> num {
+  return(149);
+}
+fn public f150() -> num {
+  return(150);
+}
+fn public f151() -> num {
+  return(151);
+}
+fn public f152() -> num {
+  return(152);
+}
+fn public f153() -> num {
+  return(153);
+}
+fn public f154() -> num {
+  return(154);
+}
+fn public f155() -> num {
+  return(155);
+}
+fn public f156() -> num {
+  return(156);
+}
+fn public f157() -> num {
+  return(157);
+}
+fn public f158() -> num {
+  return(158);
+}
+fn public f159() -> num {
+  return(159);
+}
+fn public f160() -> num {
+  return(160);
+}
+fn public f161() -> num {
+  return(161);
+}
+fn public f162() -> num {
+  return(162);
+}
+fn public f163() -> num {
+  return(163);
+}
+fn public f164() -> num {
+  return(164);
+}
+fn public f165() -> num {
+  return(165);
+}
+fn public f166() -> num {
+  return(166);
+}
+fn public f167() -> num {
+  return(167);
+}
+fn public f168() -> num {
+  return(168);
+}
+fn public f169() -> num {
+  return(169);
+}
+fn public f170() -> num {
+  return(170);
+}
+fn public f171() -> num {
+  return(171);
+}
+fn public f172() -> num {
+  return(172);
+}
+fn public f173() -> num {
+  return(173);
+}
+fn public f174() -> num {
+  return(174);
+}
+fn public f175() -> num {
+  return(175);
+}
+fn public f176() -> num {
+  return(176);
+}
+fn public f177() -> num {
+  return(177);
+}
+fn public f178() -> num {
+  return(178);
+}
+fn public f179() -> num {
+  return(179);
+}
+fn public f180() -> num {
+  return(180);
+}
+fn public f181() -> num {
+  return(181);
+}
+fn public f182() -> num {
+  return(182);
+}
+fn public f183() -> num {
+  return(183);
+}
+fn public f184() -> num {
+  return(184);
+}
+fn public f185() -> num {
+  return(185);
+}
+fn public f186() -> num {
+  return(186);
+}
+fn public f187() -> num {
+  return(187);
+}
+fn public f188() -> num {
+  return(188);
+}
+fn public f189() -> num {
+  return(189);
+}
+fn public f190() -> num {
+  return(190);
+}
+fn public f191() -> num {
+  return(191);
+}
+fn public f192() -> num {
+  return(192);
+}
+fn public f193() -> num {
+  return(193);
+}
+fn public f194() -> num {
+  return(194);
+}
+fn public f195() -> num {
+  return(195);
+}
+fn public f196() -> num {
+  return(196);
+}
+fn public f197() -> num {
+  return(197);
+}
+fn public f198() -> num {
+  return(198);
+}
+fn public f199() -> num {
+  return(199);
+}
+fn public f200() -> num {
+  return(200);
+}
+fn public f201() -> num {
+  return(201);
+}
+fn public f202() -> num {
+  return(202);
+}
+fn public f203() -> num {
+  return(203);
+}
+fn public f204() -> num {
+  return(204);
+}
+fn public f205() -> num {
+  return(205);
+}
+fn public f206() -> num {
+  return(206);
+}
+fn public f207() -> num {
+  return(207);
+}
+fn public f208() -> num {
+  return(208);
+}
+fn public f209() -> num {
+  return(209);
+}
+fn public f210() -> num {
+  return(210);
+}
+fn public f211() -> num {
+  return(211);
+}
+fn public f212() -> num {
+  return(212);
+}
+fn public f213() -> num {
+  return(213);
+}
+fn public f214() -> num {
+  return(214);
+}
+fn public f215() -> num {
+  return(215);
+}
+fn public f216() -> num {
+  return(216);
+}
+fn public f217() -> num {
+  return(217);
+}
+fn public f218() -> num {
+  return(218);
+}
+fn public f219() -> num {
+  return(219);
+}
+fn public f220() -> num {
+  return(220);
+}
+fn public f221() -> num {
+  return(221);
+}
+fn public f222() -> num {
+  return(222);
+}
+fn public f223() -> num {
+  return(223);
+}
+fn public f224() -> num {
+  return(224);
+}
+fn public f225() -> num {
+  return(225);
+}
+fn public f226() -> num {
+  return(226);
+}
+fn public f227() -> num {
+  return(227);
+}
+fn public f228() -> num {
+  return(228);
+}
+fn public f229() -> num {
+  return(229);
+}
+fn public f230() -> num {
+  return(230);
+}
+fn public f231() -> num {
+  return(231);
+}
+fn public f232() -> num {
+  return(232);
+}
+fn public f233() -> num {
+  return(233);
+}
+fn public f234() -> num {
+  return(234);
+}
+fn public f235() -> num {
+  return(235);
+}
+fn public f236() -> num {
+  return(236);
+}
+fn public f237() -> num {
+  return(237);
+}
+fn public f238() -> num {
+  return(238);
+}
+fn public f239() -> num {
+  return(239);
+}
+fn public f240() -> num {
+  return(240);
+}
+fn public f241() -> num {
+  return(241);
+}
+fn public f242() -> num {
+  return(242);
+}
+fn public f243() -> num {
+  return(243);
+}
+fn public f244() -> num {
+  return(244);
+}
+fn public f245() -> num {
+  return(245);
+}
+fn public f246() -> num {
+  return(246);
+}
+fn public f247() -> num {
+  return(247);
+}
+fn public f248() -> num {
+  return(248);
+}
+fn public f249() -> num {
+  return(249);
+}
+fn public f250() -> num {
+  return(250);
+}
+fn public f251() -> num {
+  return(251);
+}
+fn public f252() -> num {
+  return(252);
+}
+fn public f253() -> num {
+  return(253);
+}
+fn public f254() -> num {
+  return(254);
+}
+fn public f255() -> num {
+  return(255);
+}
+fn public f256() -> num {
+  return(256);
+}
+fn public f257() -> num {
+  return(257);
+}
+fn public f258() -> num {
+  return(258);
+}
+fn public f259() -> num {
+  return(259);
+}
+fn public f260() -> num {
+  return(260);
+}
+fn public f261() -> num {
+  return(261);
+}
+fn public f262() -> num {
+  return(262);
+}
+fn public f263() -> num {
+  return(263);
+}
+fn public f264() -> num {
+  return(264);
+}
+fn public f265() -> num {
+  return(265);
+}
+fn public f266() -> num {
+  return(266);
+}
+fn public f267() -> num {
+  return(267);
+}
+fn public f268() -> num {
+  return(268);
+}
+fn public f269() -> num {
+  return(269);
+}
+fn public f270() -> num {
+  return(270);
+}
+fn public f271() -> num {
+  return(271);
+}
+fn public f272() -> num {
+  return(272);
+}
+fn public f273() -> num {
+  return(273);
+}
+fn public f274() -> num {
+  return(274);
+}
+fn public f275() -> num {
+  return(275);
+}
+fn public f276() -> num {
+  return(276);
+}
+fn public f277() -> num {
+  return(277);
+}
+fn public f278() -> num {
+  return(278);
+}
+fn public f279() -> num {
+  return(279);
+}
+fn public f280() -> num {
+  return(280);
+}
+fn public f281() -> num {
+  return(281);
+}
+fn public f282() -> num {
+  return(282);
+}
+fn public f283() -> num {
+  return(283);
+}
+fn public f284() -> num {
+  return(284);
+}
+fn public f285() -> num {
+  return(285);
+}
+fn public f286() -> num {
+  return(286);
+}
+fn public f287() -> num {
+  return(287);
+}
+fn public f288() -> num {
+  return(288);
+}
+fn public f289() -> num {
+  return(289);
+}
+fn public f290() -> num {
+  return(290);
+}
+fn public f291() -> num {
+  return(291);
+}
+fn public f292() -> num {
+  return(292);
+}
+fn public f293() -> num {
+  return(293);
+}
+fn public f294() -> num {
+  return(294);
+}
+fn public f295() -> num {
+  return(295);
+}
+fn public f296() -> num {
+  return(296);
+}
+fn public f297() -> num {
+  return(297);
+}
+fn public f298() -> num {
+  return(298);
+}
+fn public f299() -> num {
+  return(299);
+}
+fn public f300() -> num {
+  return(300);
+}
+fn public main() {
+  num t = 0;
+  t += f1();
+  t += f2();
+  t += f3();
+  t += f4();
+  t += f5();
+  t += f6();
+  t += f7();
+  t += f8();
+  t += f9();
+  t += f10();
+  t += f11();
+  t += f12();
+  t += f13();
+  t += f14();
+  t += f15();
+  t += f16();
+  t += f17();
+  t += f18();
+  t += f19();
+  t += f20();
+  t += f21();
+  t += f22();
+  t += f23();
+  t += f24();
+  t += f25();
+  t += f26();
+  t += f27();
+  t += f28();
+  t += f29();
+  t += f30();
+  t += f31();
+  t += f32();
+  t += f33();
+  t += f34();
+  t += f35();
+  t += f36();
+  t += f37();
+  t += f38();
+  t += f39();
+  t += f40();
+  t += f41();
+  t += f42();
+  t += f43();
+  t += f44();
+  t += f45();
+  t += f46();
+  t += f47();
+  t += f48();
+  t += f49();
+  t += f50();
+  t += f51();
+  t += f52();
+  t += f53();
+  t += f54();
+  t += f55();
+  t += f56();
+  t += f57();
+  t += f58();
+  t += f59();
+  t += f60();
+  t += f61();
+  t += f62();
+  t += f63();
+  t += f64();
+  t += f65();
+  t += f66();
+  t += f67();
+  t += f68();
+  t += f69();
+  t += f70();
+  t += f71();
+  t += f72();
+  t += f73();
+  t += f74();
+  t += f75();
+  t += f76();
+  t += f77();
+  t += f78();
+  t += f79();
+  t += f80();
+  t += f81();
+  t += f82();
+  t += f83();
+  t += f84();
+  t += f85();
+  t += f86();
+  t += f87();
+  t += f88();
+  t += f89();
+  t += f90();
+  t += f91();
+  t += f92();
+  t += f93();
+  t += f94();
+  t += f95();
+  t += f96();
+  t += f97();
+  t += f98();
+  t += f99();
+  t += f100();
+  t += f101();
+  t += f102();
+  t += f103();
+  t += f104();
+  t += f105();
+  t += f106();
+  t += f107();
+  t += f108();
+  t += f109();
+  t += f110();
+  t += f111();
+  t += f112();
+  t += f113();
+  t += f114();
+  t += f115();
+  t += f116();
+  t += f117();
+  t += f118();
+  t += f119();
+  t += f120();
+  t += f121();
+  t += f122();
+  t += f123();
+  t += f124();
+  t += f125();
+  t += f126();
+  t += f127();
+  t += f128();
+  t += f129();
+  t += f130();
+  t += f131();
+  t += f132();
+  t += f133();
+  t += f134();
+  t += f135();
+  t += f136();
+  t += f137();
+  t += f138();
+  t += f139();
+  t += f140();
+  t += f141();
+  t += f142();
+  t += f143();
+  t += f144();
+  t += f145();
+  t += f146();
+  t += f147();
+  t += f148();
+  t += f149();
+  t += f150();
+  t += f151();
+  t += f152();
+  t += f153();
+  t += f154();
+  t += f155();
+  t += f156();
+  t += f157();
+  t += f158();
+  t += f159();
+  t += f160();
+  t += f161();
+  t += f162();
+  t += f163();
+  t += f164();
+  t += f165();
+  t += f166();
+  t += f167();
+  t += f168();
+  t += f169();
+  t += f170();
+  t += f171();
+  t += f172();
+  t += f173();
+  t += f174();
+  t += f175();
+  t += f176();
+  t += f177();
+  t += f178();
+  t += f179();
+  t += f180();
+  t += f181();
+  t += f182();
+  t += f183();
+  t += f184();
+  t += f185();
+  t += f186();
+  t += f187();
+  t += f188();
+  t += f189();
+  t += f190();
+  t += f191();
+  t += f192();
+  t += f193();
+  t += f194();
+  t += f195();
+  t += f196();
+  t += f197();
+  t += f198();
+  t += f199();
+  t += f200();
+  t += f201();
+  t += f202();
+  t += f203();
+  t += f204();
+  t += f205();
+  t += f206();
+  t += f207();
+  t += f208();
+  t += f209();
+  t += f210();
+  t += f211();
+  t += f212();
+  t += f213();
+  t += f214();
+  t += f215();
+  t += f216();
+  t += f217();
+  t += f218();
+  t += f219();
+  t += f220();
+  t += f221();
+  t += f222();
+  t += f223();
+  t += f224();
+  t += f225();
+  t += f226();
+  t += f227();
+  t += f228();
+  t += f229();
+  t += f230();
+  t += f231();
+  t += f232();
+  t += f233();
+  t += f234();
+  t += f235();
+  t += f236();
+  t += f237();
+  t += f238();
+  t += f239();
+  t += f240();
+  t += f241();
+  t += f242();
+  t += f243();
+  t += f244();
+  t += f245();
+  t += f246();
+  t += f247();
+  t += f248();
+  t += f249();
+  t += f250();
+  t += f251();
+  t += f252();
+  t += f253();
+  t += f254();
+  t += f255();
+  t += f256();
+  t += f257();
+  t += f258();
+  t += f259();
+  t += f260();
+  t += f261();
+  t += f262();
+  t += f263();
+  t += f264();
+  t += f265();
+  t += f266();
+  t += f267();
+  t += f268();
+  t += f269();
+  t += f270();
+  t += f271();
+  t += f272();
+  t += f273();
+  t += f274();
+  t += f275();
+  t += f276();
+  t += f277();
+  t += f278();
+  t += f279();
+  t += f280();
+  t += f281();
+  t += f282();
+  t += f283();
+  t += f284();
+  t += f285();
+  t += f286();
+  t += f287();
+  t += f288();
+  t += f289();
+  t += f290();
+  t += f291();
+  t += f292();
+  t += f293();
+  t += f294();
+  t += f295();
+  t += f296();
+  t += f297();
+  t += f298();
+  t += f299();
+  t += f300();
+  print(t);
+  print("\n");
+  return(0);
+}
+main();
