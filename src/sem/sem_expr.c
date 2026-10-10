@@ -4,13 +4,14 @@
  * @brief Tells whether a call name is a builtin runtime operation
  * @param name Call name
  * @return Non-zero for input, len, tostr, tonum, readFile, writeFile,
- * char, args
+ * char, args, system
  */
 static int is_builtin(const char *name) {
   return strcmp(name, "input") == 0 || strcmp(name, "len") == 0 ||
          strcmp(name, "tostr") == 0 || strcmp(name, "tonum") == 0 ||
          strcmp(name, "readFile") == 0 || strcmp(name, "writeFile") == 0 ||
-         strcmp(name, "char") == 0 || strcmp(name, "args") == 0;
+         strcmp(name, "char") == 0 || strcmp(name, "args") == 0 ||
+         strcmp(name, "system") == 0;
 }
 
 /**
@@ -160,6 +161,9 @@ SemType sem_peek(Node *node) {
     }
     if (strcmp(nm, "char") == 0) {
       return ST_STR;
+    }
+    if (strcmp(nm, "system") == 0) {
+      return ST_INT;
     }
     if (strcmp(nm, "args") == 0) {
       return ST_ARR;
@@ -1069,6 +1073,21 @@ static SemType touch_builtin_call(Node *node) {
     }
     sem_record_type(node, ST_ARR, NULL);
     return ST_ARR;
+  }
+  if (strcmp(name, "system") == 0) {
+    if (nargs != 1) {
+      sem_error(node, "system takes exactly 1 argument");
+    }
+    if (args != NULL) {
+      SemType given = sem_validate(args);
+      if (given != ST_STR) {
+        sem_error(args, "system expects a str command, got %s",
+                  sem_type_name(given));
+      }
+      sem_touch(args);
+    }
+    sem_record_type(node, ST_INT, NULL);
+    return ST_INT;
   }
   if (nargs != 2) {
     sem_error(node, "writeFile takes exactly 2 arguments");

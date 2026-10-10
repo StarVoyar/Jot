@@ -37,6 +37,7 @@ void GenerateAssemblyFp(IrModule *mod, const char *source, FILE *out,
   fprintf(out, "extern fread\n");
   fprintf(out, "extern fwrite\n");
   fprintf(out, "extern fclose\n");
+  fprintf(out, "extern system\n");
   x86_data_section(mod, out);
   fprintf(out, "section .text\n");
 

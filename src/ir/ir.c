@@ -271,6 +271,8 @@ static const char *dump_op(IrOp op) {
     return "chr";
   case IR_ARGS:
     return "args";
+  case IR_SYSTEM:
+    return "system";
   case IR_NEWARR:
     return "newarr";
   case IR_ARR_LOAD:

@@ -2553,7 +2553,8 @@ static Node *parse_method_def() {
       strcmp(node->method_def.name, "readFile") == 0 ||
       strcmp(node->method_def.name, "writeFile") == 0 ||
       strcmp(node->method_def.name, "char") == 0 ||
-      strcmp(node->method_def.name, "args") == 0) {
+      strcmp(node->method_def.name, "args") == 0 ||
+      strcmp(node->method_def.name, "system") == 0) {
     parse_error("Method name is reserved\n");
   }
   current_token++;
@@ -2895,7 +2896,8 @@ static Node *parse_function() {
       strcmp(node->function.name, "readFile") == 0 ||
       strcmp(node->function.name, "writeFile") == 0 ||
       strcmp(node->function.name, "char") == 0 ||
-      strcmp(node->function.name, "args") == 0) {
+      strcmp(node->function.name, "args") == 0 ||
+      strcmp(node->function.name, "system") == 0) {
     parse_error("Function name is reserved, use another name\n");
   }
   check_reserved_ident(node->function.name);
@@ -3360,24 +3362,25 @@ Node *Parser(Token *tokens, const char *filename) {
   int progressed = 1;
   while (progressed) {
     progressed = 0;
-    for (Node *s = program_head; s != NULL; s = s->right) {
-      Node *calls[1024];
-      int call_count = 0;
-      collect_calls(s, calls, &call_count, 1024);
-      for (int k = 0; k < call_count; k++) {
-        if (find_function_in(program_head, calls[k]->func_call.name) != NULL) {
-          continue;
-        }
-        Node *dep = NULL;
-        for (int r = 0; r < import_done_count && dep == NULL; r++) {
-          dep = find_function_in(import_roots[r], calls[k]->func_call.name);
-        }
-        if (dep == NULL) {
-          continue;
-        }
-        emit_statement(clone_node(dep));
-        progressed = 1;
+    /* Collect once per pass: collect_calls follows statement links, so
+       per-statement collection would rescan the tail every time (cubic).
+       Deps merged this pass are picked up by the next pass instead. */
+    Node *calls[1024];
+    int call_count = 0;
+    collect_calls(program_head, calls, &call_count, 1024);
+    for (int k = 0; k < call_count; k++) {
+      if (find_function_in(program_head, calls[k]->func_call.name) != NULL) {
+        continue;
       }
+      Node *dep = NULL;
+      for (int r = 0; r < import_done_count && dep == NULL; r++) {
+        dep = find_function_in(import_roots[r], calls[k]->func_call.name);
+      }
+      if (dep == NULL) {
+        continue;
+      }
+      emit_statement(clone_node(dep));
+      progressed = 1;
     }
   }
 
@@ -3394,7 +3397,8 @@ Node *Parser(Token *tokens, const char *filename) {
           strcmp(calls[k]->func_call.name, "readFile") == 0 ||
           strcmp(calls[k]->func_call.name, "writeFile") == 0 ||
           strcmp(calls[k]->func_call.name, "char") == 0 ||
-          strcmp(calls[k]->func_call.name, "args") == 0) {
+          strcmp(calls[k]->func_call.name, "args") == 0 ||
+          strcmp(calls[k]->func_call.name, "system") == 0) {
         continue;
       }
       Node *def = find_function_in(program_head, calls[k]->func_call.name);

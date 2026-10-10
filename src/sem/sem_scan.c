@@ -184,6 +184,9 @@ static SemType scan_peek(Node *node, ScanCtx *ctx) {
     if (strcmp(nm, "char") == 0) {
       return ST_STR;
     }
+    if (strcmp(nm, "system") == 0) {
+      return ST_INT;
+    }
     if (strcmp(nm, "args") == 0) {
       return ST_ARR;
     }
@@ -339,6 +342,9 @@ static int scan_expr_state(Node *node, ScanCtx *ctx) {
     }
     if (strcmp(nm, "char") == 0) {
       return SST_STR;
+    }
+    if (strcmp(nm, "system") == 0) {
+      return SST_INT;
     }
     if (strcmp(nm, "input") == 0) {
       return SST_INT;

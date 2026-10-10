@@ -229,6 +229,8 @@ static IrVal builtin_call(BuildCtx *ctx, Node *node) {
     op = IR_CHR;
   } else if (strcmp(name, "args") == 0) {
     op = IR_ARGS;
+  } else if (strcmp(name, "system") == 0) {
+    op = IR_SYSTEM;
   }
   IrInstr ins = ir_instr(op);
   for (Node *a = node->func_call.args; a != NULL; a = a->right) {
@@ -789,7 +791,8 @@ IrVal irb_expr(BuildCtx *ctx, Node *node) {
     if (strcmp(name, "input") == 0 || strcmp(name, "len") == 0 ||
         strcmp(name, "tostr") == 0 || strcmp(name, "tonum") == 0 ||
         strcmp(name, "readFile") == 0 || strcmp(name, "writeFile") == 0 ||
-        strcmp(name, "char") == 0 || strcmp(name, "args") == 0) {
+        strcmp(name, "char") == 0 || strcmp(name, "args") == 0 ||
+        strcmp(name, "system") == 0) {
       return builtin_call(ctx, node);
     }
     int fi = sem_func_at(name);

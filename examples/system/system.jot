@@ -1,0 +1,10 @@
+// system() runs a shell command and returns its exit code.
+fn public main() {
+  print(system("exit 0"));
+  print("\n");
+  print(system("exit 3"));
+  print("\n");
+  return(0);
+}
+
+main();

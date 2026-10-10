@@ -39,40 +39,6 @@ int opt_val_equal(IrVal a, IrVal b) {
   return a.kind == b.kind && a.idx == b.idx && a.imm == b.imm;
 }
 
-void opt_slot_info(IrFunc *f, int slot, int *uses, int *defs) {
-  int u = 0;
-  int d = 0;
-  for (int b = 0; b < f->nblocks; b++) {
-    for (int k = 0; k < f->blocks[b].nins; k++) {
-      IrInstr *ins = &f->blocks[b].ins[k];
-      if (ins->op == IR_NOP) {
-        continue;
-      }
-      if (ins->dst == slot) {
-        d++;
-      }
-      for (int i = 0; i < ins->nv; i++) {
-        if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
-            ins->v[i].idx == slot) {
-          u++;
-        }
-      }
-      for (int i = 0; i < ins->nlist; i++) {
-        if ((ins->list[i].kind == IRV_TEMP || ins->list[i].kind == IRV_VAR) &&
-            ins->list[i].idx == slot) {
-          u++;
-        }
-      }
-    }
-  }
-  if (uses != NULL) {
-    *uses = u;
-  }
-  if (defs != NULL) {
-    *defs = d;
-  }
-}
-
 void opt_blank(IrInstr *ins) {
   if (ins->list != NULL) {
     free(ins->list);
@@ -81,30 +47,6 @@ void opt_blank(IrInstr *ins) {
   ins->nlist = 0;
   ins->op = IR_NOP;
   ins->dst = -1;
-}
-
-void opt_replace_uses(IrFunc *f, int slot, IrVal v) {
-  for (int b = 0; b < f->nblocks; b++) {
-    for (int k = 0; k < f->blocks[b].nins; k++) {
-      IrInstr *ins = &f->blocks[b].ins[k];
-      if (ins->op == IR_NOP) {
-        continue;
-      }
-      for (int i = 0; i < ins->nv; i++) {
-        if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
-            ins->v[i].idx == slot) {
-          ins->v[i] = v;
-        }
-      }
-      for (int i = 0; i < ins->nlist; i++) {
-        if ((ins->list[i].kind == IRV_TEMP ||
-             ins->list[i].kind == IRV_VAR) &&
-            ins->list[i].idx == slot) {
-          ins->list[i] = v;
-        }
-      }
-    }
-  }
 }
 
 int opt_compact(IrFunc *f) {
@@ -506,31 +448,75 @@ int opt_prop(IrModule *m) {
   for (int fi = 0; fi < m->nfuncs; fi++) {
     IrFunc *f = &m->funcs[fi];
     int nslots = f->nvars + f->ntemps;
-    for (int s = f->nvars; s < nslots; s++) {
-      int uses, defs;
-      opt_slot_info(f, s, &uses, &defs);
-      if (uses == 0 || defs != 1) {
-        continue;
-      }
-      IrVal c;
-      int is_const = 0;
-      for (int b = 0; b < f->nblocks && !is_const; b++) {
-        for (int k = 0; k < f->blocks[b].nins; k++) {
-          IrInstr *ins = &f->blocks[b].ins[k];
-          if (ins->op != IR_NOP && ins->dst == s &&
+    int *uses = calloc((size_t)nslots, sizeof(int));
+    int *defs = calloc((size_t)nslots, sizeof(int));
+    IrVal *cval = malloc((size_t)nslots * sizeof(IrVal));
+    char *is_const = calloc((size_t)nslots, 1);
+    /* Pass 1: count uses/defs, remembering single constant definitions. */
+    for (int b = 0; b < f->nblocks; b++) {
+      for (int k = 0; k < f->blocks[b].nins; k++) {
+        IrInstr *ins = &f->blocks[b].ins[k];
+        if (ins->op == IR_NOP) {
+          continue;
+        }
+        if (ins->dst >= f->nvars && ins->dst < nslots) {
+          if (defs[ins->dst] == 0 &&
               (ins->op == IR_CONST_I || ins->op == IR_CONST_F ||
                ins->op == IR_CONST_S || ins->op == IR_CONST_NULL)) {
-            c = ins->v[0];
-            is_const = 1;
-            break;
+            cval[ins->dst] = ins->v[0];
+            is_const[ins->dst] = 1;
+          } else {
+            is_const[ins->dst] = 0;
+          }
+          defs[ins->dst]++;
+        }
+        for (int i = 0; i < ins->nv; i++) {
+          if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
+              ins->v[i].idx >= 0 && ins->v[i].idx < nslots) {
+            uses[ins->v[i].idx]++;
+          }
+        }
+        for (int i = 0; i < ins->nlist; i++) {
+          if ((ins->list[i].kind == IRV_TEMP ||
+               ins->list[i].kind == IRV_VAR) &&
+              ins->list[i].idx >= 0 && ins->list[i].idx < nslots) {
+            uses[ins->list[i].idx]++;
           }
         }
       }
-      if (is_const) {
-        opt_replace_uses(f, s, c);
-        changed = 1;
+    }
+    /* Pass 2: substitute the constants (same single-def rule as before). */
+    for (int b = 0; b < f->nblocks; b++) {
+      for (int k = 0; k < f->blocks[b].nins; k++) {
+        IrInstr *ins = &f->blocks[b].ins[k];
+        if (ins->op == IR_NOP) {
+          continue;
+        }
+        for (int i = 0; i < ins->nv; i++) {
+          int idx = ins->v[i].idx;
+          if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
+              idx >= f->nvars && idx < nslots && uses[idx] > 0 &&
+              defs[idx] == 1 && is_const[idx]) {
+            ins->v[i] = cval[idx];
+            changed = 1;
+          }
+        }
+        for (int i = 0; i < ins->nlist; i++) {
+          int idx = ins->list[i].idx;
+          if ((ins->list[i].kind == IRV_TEMP ||
+               ins->list[i].kind == IRV_VAR) &&
+              idx >= f->nvars && idx < nslots && uses[idx] > 0 &&
+              defs[idx] == 1 && is_const[idx]) {
+            ins->list[i] = cval[idx];
+            changed = 1;
+          }
+        }
       }
     }
+    free(uses);
+    free(defs);
+    free(cval);
+    free(is_const);
   }
   return changed;
 }
@@ -540,29 +526,73 @@ int opt_copies(IrModule *m) {
   for (int fi = 0; fi < m->nfuncs; fi++) {
     IrFunc *f = &m->funcs[fi];
     int nslots = f->nvars + f->ntemps;
-    for (int s = f->nvars; s < nslots; s++) {
-      int uses, defs;
-      opt_slot_info(f, s, &uses, &defs);
-      if (uses == 0 || defs != 1) {
-        continue;
-      }
-      IrVal src;
-      int is_copy = 0;
-      for (int b = 0; b < f->nblocks && !is_copy; b++) {
-        for (int k = 0; k < f->blocks[b].nins; k++) {
-          IrInstr *ins = &f->blocks[b].ins[k];
-          if (ins->op == IR_COPY && ins->dst == s && ins->nv == 1) {
-            src = ins->v[0];
-            is_copy = 1;
-            break;
+    int *uses = calloc((size_t)nslots, sizeof(int));
+    int *defs = calloc((size_t)nslots, sizeof(int));
+    IrVal *src = malloc((size_t)nslots * sizeof(IrVal));
+    char *is_copy = calloc((size_t)nslots, 1);
+    /* Pass 1: count uses/defs, remembering single copy definitions. */
+    for (int b = 0; b < f->nblocks; b++) {
+      for (int k = 0; k < f->blocks[b].nins; k++) {
+        IrInstr *ins = &f->blocks[b].ins[k];
+        if (ins->op == IR_NOP) {
+          continue;
+        }
+        if (ins->dst >= f->nvars && ins->dst < nslots) {
+          if (defs[ins->dst] == 0 && ins->op == IR_COPY && ins->nv == 1) {
+            src[ins->dst] = ins->v[0];
+            is_copy[ins->dst] = 1;
+          } else {
+            is_copy[ins->dst] = 0;
+          }
+          defs[ins->dst]++;
+        }
+        for (int i = 0; i < ins->nv; i++) {
+          if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
+              ins->v[i].idx >= 0 && ins->v[i].idx < nslots) {
+            uses[ins->v[i].idx]++;
+          }
+        }
+        for (int i = 0; i < ins->nlist; i++) {
+          if ((ins->list[i].kind == IRV_TEMP ||
+               ins->list[i].kind == IRV_VAR) &&
+              ins->list[i].idx >= 0 && ins->list[i].idx < nslots) {
+            uses[ins->list[i].idx]++;
           }
         }
       }
-      if (is_copy) {
-        opt_replace_uses(f, s, src);
-        changed = 1;
+    }
+    /* Pass 2: forward the copies (same single-def rule as before). */
+    for (int b = 0; b < f->nblocks; b++) {
+      for (int k = 0; k < f->blocks[b].nins; k++) {
+        IrInstr *ins = &f->blocks[b].ins[k];
+        if (ins->op == IR_NOP) {
+          continue;
+        }
+        for (int i = 0; i < ins->nv; i++) {
+          int idx = ins->v[i].idx;
+          if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
+              idx >= f->nvars && idx < nslots && uses[idx] > 0 &&
+              defs[idx] == 1 && is_copy[idx]) {
+            ins->v[i] = src[idx];
+            changed = 1;
+          }
+        }
+        for (int i = 0; i < ins->nlist; i++) {
+          int idx = ins->list[i].idx;
+          if ((ins->list[i].kind == IRV_TEMP ||
+               ins->list[i].kind == IRV_VAR) &&
+              idx >= f->nvars && idx < nslots && uses[idx] > 0 &&
+              defs[idx] == 1 && is_copy[idx]) {
+            ins->list[i] = src[idx];
+            changed = 1;
+          }
+        }
       }
     }
+    free(uses);
+    free(defs);
+    free(src);
+    free(is_copy);
   }
   return changed;
 }

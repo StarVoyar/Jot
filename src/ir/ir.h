@@ -69,6 +69,7 @@ typedef enum {
   IR_WRITEFILE,  /**< Text to file, result is bytes written */
   IR_CHR,        /**< Character code to 1-byte heap string (traps out of range) */
   IR_ARGS,       /**< Command-line arguments to heap string array */
+  IR_SYSTEM,     /**< Run a shell command, result is the exit code */
   IR_NEWARR,     /**< Allocate and fill an array block */
   IR_ARR_LOAD,   /**< Bounds-checked element load */
   IR_ARR_STORE,  /**< Bounds-checked element store (op in aux) */

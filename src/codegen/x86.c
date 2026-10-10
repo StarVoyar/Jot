@@ -1512,6 +1512,43 @@ static void sel_args(IrInstr *ins) {
 }
 
 /**
+ * @brief Emits system (run a shell command, result is the exit code)
+ * @param ins System instruction (list[0] is the command)
+ * @details Inherits stdio so command output shows. C system() returns the
+ * exit code directly on Windows but wait status on System V (need_plt marks
+ * that target), so the latter extracts WEXITSTATUS and reports -1 when the
+ * child did not exit normally.
+ */
+static void sel_system(IrInstr *ins) {
+  load_rax(op_of(ins->list[0]));
+  fprintf(xo, "  test rax, rax\n");
+  fprintf(xo, "  jz null_trap\n");
+  fprintf(xo, "  mov %s, rax\n", areg(0));
+  gen_runtime_prologue();
+  extcall("system");
+  gen_runtime_epilogue();
+  if (xt->need_plt) {
+    int seq = x_seq++;
+    fprintf(xo, "  mov rbx, rax\n");
+    fprintf(xo, "  test bl, 0x7f\n");
+    fprintf(xo, "  jnz sys_fail%d\n", seq);
+    fprintf(xo, "  mov eax, ebx\n");
+    fprintf(xo, "  shr eax, 8\n");
+    fprintf(xo, "  and eax, 0xff\n");
+    fprintf(xo, "  jmp sys_done%d\n", seq);
+    fprintf(xo, "sys_fail%d:\n", seq);
+    fprintf(xo, "  mov rax, -1\n");
+    fprintf(xo, "sys_done%d:\n", seq);
+  }
+  int ti = ins->dst - xf->nvars;
+  if (ti >= 0 && ti < xa->ntemps && xa->temps[ti].is_reg) {
+    fprintf(xo, "  mov %s, rax\n", reg_name(xa->temps[ti].reg));
+  } else {
+    store_slot(ins->dst);
+  }
+}
+
+/**
  * @brief Concatenates two strings, result left in rax
  * @details IN: rax holds left pointer, rbx holds right pointer, rsp aligned.
  * Allocates len1+len2+1 bytes and copies both parts including the NUL.
@@ -2220,6 +2257,9 @@ static int sel_instr(int fi, int bi, int k, IrInstr *ins, int is_entry) {
   case IR_ARGS:
     sel_args(ins);
     break;
+  case IR_SYSTEM:
+    sel_system(ins);
+    break;
   case IR_NEWARR:
     sel_newarr(ins);
     break;
@@ -2381,8 +2421,10 @@ void x86_data_section(IrModule *m, FILE *out) {
   fprintf(out, "section .data\n");
   fprintf(out, "  fmt_int db \"%%lld\", 10, 0\n");
   fprintf(out, "  fmt_int_raw db \"%%lld\", 0\n");
-  fprintf(out, "  fmt_float db \"%%.15g\", 10, 0\n");
-  fprintf(out, "  fmt_float_raw db \"%%.15g\", 0\n");
+  /* 17 significant digits: every double round-trips (15 could merge
+     neighboring values, e.g. 0.1 + 0.2 printed without its final 4). */
+  fprintf(out, "  fmt_float db \"%%.17g\", 10, 0\n");
+  fprintf(out, "  fmt_float_raw db \"%%.17g\", 0\n");
   fprintf(out, "  fmt_str db \"%%s\", 0\n");
   fprintf(out, "  fmt_input db \"%%d\", 0\n");
   fprintf(out, "  fmt_invalid db \"invalid input: expected integer\", 10, 0\n");

@@ -5,22 +5,46 @@ int opt_dce(IrModule *m) {
   for (int fi = 0; fi < m->nfuncs; fi++) {
     IrFunc *f = &m->funcs[fi];
     int nslots = f->nvars + f->ntemps;
-    for (int s = f->nvars; s < nslots; s++) {
-      int uses, defs;
-      opt_slot_info(f, s, &uses, &defs);
-      if (uses != 0 || defs == 0) {
-        continue;
+    /* Cascades converge round by round (old code recounted per slot);
+       each round is linear and blanks at least one instruction. */
+    int progress = 1;
+    while (progress) {
+      progress = 0;
+      int *uses = calloc((size_t)nslots, sizeof(int));
+      for (int b = 0; b < f->nblocks; b++) {
+        for (int k = 0; k < f->blocks[b].nins; k++) {
+          IrInstr *ins = &f->blocks[b].ins[k];
+          if (ins->op == IR_NOP) {
+            continue;
+          }
+          for (int i = 0; i < ins->nv; i++) {
+            if ((ins->v[i].kind == IRV_TEMP || ins->v[i].kind == IRV_VAR) &&
+                ins->v[i].idx >= 0 && ins->v[i].idx < nslots) {
+              uses[ins->v[i].idx]++;
+            }
+          }
+          for (int i = 0; i < ins->nlist; i++) {
+            if ((ins->list[i].kind == IRV_TEMP ||
+                 ins->list[i].kind == IRV_VAR) &&
+                ins->list[i].idx >= 0 && ins->list[i].idx < nslots) {
+              uses[ins->list[i].idx]++;
+            }
+          }
+        }
       }
       for (int b = 0; b < f->nblocks; b++) {
         for (int k = 0; k < f->blocks[b].nins; k++) {
           IrInstr *ins = &f->blocks[b].ins[k];
-          if (ins->op != IR_NOP && ins->dst == s &&
+          if (ins->op != IR_NOP && ins->dst >= f->nvars &&
+              ins->dst < nslots && uses[ins->dst] == 0 &&
               opt_is_pure(ins->op)) {
             opt_blank(ins);
+            progress = 1;
             changed = 1;
           }
         }
       }
+      free(uses);
     }
   }
   return changed;
