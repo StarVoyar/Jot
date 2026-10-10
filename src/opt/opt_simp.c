@@ -194,6 +194,12 @@ static int cse_ok(IrInstr *ins) {
   case IR_MUL:
   case IR_DIV:
   case IR_MOD:
+  case IR_AND:
+  case IR_OR:
+  case IR_XOR:
+  case IR_SHL:
+  case IR_SHR:
+  case IR_NOT:
   case IR_CMP:
   case IR_I2F:
   case IR_F2I:

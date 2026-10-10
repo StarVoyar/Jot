@@ -25,6 +25,8 @@ static int calls_runtime(IrInstr *ins) {
   case IR_TONUM:
   case IR_READFILE:
   case IR_WRITEFILE:
+  case IR_CHR:
+  case IR_ARGS:
   case IR_STR_IDX:
   case IR_PRINT_S:
   case IR_PRINT_V:

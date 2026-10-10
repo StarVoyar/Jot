@@ -213,6 +213,10 @@ static IrVal builtin_call(BuildCtx *ctx, Node *node) {
   IrOp op = IR_INPUT;
   if (strcmp(name, "len") == 0) {
     op = IR_LEN;
+    if (node->func_call.args != NULL &&
+        sem_expr_type(node->func_call.args) == ST_ARR) {
+      op = IR_ARR_LEN;
+    }
   } else if (strcmp(name, "tostr") == 0) {
     op = IR_TOSTR;
   } else if (strcmp(name, "tonum") == 0) {
@@ -221,6 +225,10 @@ static IrVal builtin_call(BuildCtx *ctx, Node *node) {
     op = IR_READFILE;
   } else if (strcmp(name, "writeFile") == 0) {
     op = IR_WRITEFILE;
+  } else if (strcmp(name, "char") == 0) {
+    op = IR_CHR;
+  } else if (strcmp(name, "args") == 0) {
+    op = IR_ARGS;
   }
   IrInstr ins = ir_instr(op);
   for (Node *a = node->func_call.args; a != NULL; a = a->right) {
@@ -228,6 +236,14 @@ static IrVal builtin_call(BuildCtx *ctx, Node *node) {
     ins.list =
         realloc(ins.list, (size_t)(ins.nlist + 1) * sizeof(IrVal));
     ins.list[ins.nlist++] = v;
+  }
+  /* sel_arr_len reads v[0] (for-loop convention); move the operand over. */
+  if (op == IR_ARR_LEN && ins.nlist == 1) {
+    ins.v[0] = ins.list[0];
+    ins.nv = 1;
+    free(ins.list);
+    ins.list = NULL;
+    ins.nlist = 0;
   }
   SemType rs = sem_expr_type(node);
   int t = irb_temp(ctx, irb_type(rs));
@@ -297,8 +313,39 @@ static IrVal binary_val(BuildCtx *ctx, Node *node) {
     irb_emit(ctx, ins);
     return ir_temp(t, IR_BOOL);
   }
-  IrType common = (lt == IR_FLOAT || rt == IR_FLOAT) ? IR_FLOAT : IR_INT;
-  if (common == IR_FLOAT) {
+  /* Bitwise ops are int-only (sem guarantees it): no float conversion,
+     wrapping semantics, shift counts masked at emission. "~" reads only
+     the right operand; its dummy 0 left never reaches IR. */
+  if (strcmp(op, "&") == 0 || strcmp(op, "|") == 0 ||
+      strcmp(op, "^") == 0 || strcmp(op, "<<") == 0 ||
+      strcmp(op, ">>") == 0 || strcmp(op, "~") == 0) {
+    int t = irb_temp(ctx, IR_INT);
+    IrInstr ins = ir_instr(IR_AND);
+    if (strcmp(op, "|") == 0) {
+      ins.op = IR_OR;
+    } else if (strcmp(op, "^") == 0) {
+      ins.op = IR_XOR;
+    } else if (strcmp(op, "<<") == 0) {
+      ins.op = IR_SHL;
+    } else if (strcmp(op, ">>") == 0) {
+      ins.op = IR_SHR;
+    } else if (strcmp(op, "~") == 0) {
+      ins.op = IR_NOT;
+    }
+    ins.dst = t;
+    ins.type = IR_INT;
+    if (ins.op == IR_NOT) {
+      ins.v[0] = r;
+      ins.nv = 1;
+    } else {
+      ins.v[0] = l;
+      ins.v[1] = r;
+      ins.nv = 2;
+    }
+    irb_emit(ctx, ins);
+    return ir_temp(t, IR_INT);
+  }
+  IrType common = (lt == IR_FLOAT || rt == IR_FLOAT) ? IR_FLOAT : IR_INT;  if (common == IR_FLOAT) {
     l = irb_convert(ctx, l, IR_FLOAT);
     r = irb_convert(ctx, r, IR_FLOAT);
   }
@@ -741,7 +788,8 @@ IrVal irb_expr(BuildCtx *ctx, Node *node) {
     const char *name = node->func_call.name;
     if (strcmp(name, "input") == 0 || strcmp(name, "len") == 0 ||
         strcmp(name, "tostr") == 0 || strcmp(name, "tonum") == 0 ||
-        strcmp(name, "readFile") == 0 || strcmp(name, "writeFile") == 0) {
+        strcmp(name, "readFile") == 0 || strcmp(name, "writeFile") == 0 ||
+        strcmp(name, "char") == 0 || strcmp(name, "args") == 0) {
       return builtin_call(ctx, node);
     }
     int fi = sem_func_at(name);

@@ -181,6 +181,12 @@ static SemType scan_peek(Node *node, ScanCtx *ctx) {
     if (strcmp(nm, "readFile") == 0) {
       return ST_STR;
     }
+    if (strcmp(nm, "char") == 0) {
+      return ST_STR;
+    }
+    if (strcmp(nm, "args") == 0) {
+      return ST_ARR;
+    }
     SemProg *sp = sem_prog();
     for (int s = 0; s < sp->nfuncs; s++) {
       if (strcmp(sp->funcs[s].name, nm) == 0) {
@@ -329,6 +335,9 @@ static int scan_expr_state(Node *node, ScanCtx *ctx) {
       return SST_FLOAT;
     }
     if (strcmp(nm, "tostr") == 0 || strcmp(nm, "readFile") == 0) {
+      return SST_STR;
+    }
+    if (strcmp(nm, "char") == 0) {
       return SST_STR;
     }
     if (strcmp(nm, "input") == 0) {

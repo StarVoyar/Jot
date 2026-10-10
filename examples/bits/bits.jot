@@ -1,0 +1,66 @@
+// Bitwise ops (ints only, wrapping; >> is arithmetic, counts mask to 63)
+// plus char() codes and args() count. Params keep values opaque so the
+// register/cl emission paths run, not just constant folding.
+fn public band(num a, num b) -> num {
+  return(self.a & self.b);
+}
+
+fn public bor(num a, num b) -> num {
+  return(self.a | self.b);
+}
+
+fn public bxor(num a, num b) -> num {
+  return(self.a ^ self.b);
+}
+
+fn public shl(num a, num b) -> num {
+  return(self.a << self.b);
+}
+
+fn public shr(num a, num b) -> num {
+  return(self.a >> self.b);
+}
+
+fn public inv(num a) -> num {
+  return(~self.a);
+}
+
+fn public main() {
+  print(band(12, 10));
+  print("\n");
+  print(bor(12, 10));
+  print("\n");
+  print(bxor(12, 10));
+  print("\n");
+  print(shl(1, 4));
+  print("\n");
+  print(shr(-8, 2));
+  print("\n");
+  print(inv(0));
+  print("\n");
+  print(shl(1, 64));
+  print("\n");
+  print(shl(5, 70));
+  print("\n");
+  print(1 | 2 & 3);
+  print("\n");
+  print(1 << 2 + 1);
+  print("\n");
+  print(char(65));
+  print(char(66));
+  print("\n");
+  str s = "";
+  num i = 97;
+  while (i < 100) {
+    s = s + char(i);
+    i += 1;
+  }
+  print(s);
+  print("\n");
+  arr a = args();
+  print(len(a));
+  print("\n");
+  return(0);
+}
+
+main();

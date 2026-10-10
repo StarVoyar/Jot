@@ -146,7 +146,11 @@ Token *Lexer(FILE *file) {
       case '=':
       case '!':
       case '<':
-      case '>': {
+      case '>':
+      case '&':
+      case '|':
+      case '^':
+      case '~': {
         Token *token = lex_operator(character, &current_index);
         tokens[tokens_index] = *token;
         tokens_index++;
@@ -440,7 +444,9 @@ Token *lex_operator(char character, int *current_index) {
       (character == '>' && next_char == '=') ||
       (character == '+' && next_char == '=') ||
       (character == '-' && next_char == '=') ||
-      (character == '-' && next_char == '>')) {
+      (character == '-' && next_char == '>') ||
+      (character == '<' && next_char == '<') ||
+      (character == '>' && next_char == '>')) {
     op[1] = next_char;
     (*current_index)++;
   }

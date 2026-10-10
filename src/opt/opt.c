@@ -16,6 +16,12 @@ int opt_is_pure(IrOp op) {
   case IR_MUL:
   case IR_DIV:
   case IR_MOD:
+  case IR_AND:
+  case IR_OR:
+  case IR_XOR:
+  case IR_SHL:
+  case IR_SHR:
+  case IR_NOT:
   case IR_CMP:
   case IR_I2F:
   case IR_F2I:
@@ -259,6 +265,46 @@ static int fold_instr(IrModule *m, IrInstr *ins) {
       return make_const(ins, ir_imm_i(a & 0xFF, IR_INT));
     }
     return 0;
+  case IR_NOT:
+    if (ins->nv == 1 && const_int(ins->v[0], &a)) {
+      return make_const(ins, ir_imm_i(~a, IR_INT));
+    }
+    return 0;
+  case IR_AND:
+  case IR_OR:
+  case IR_XOR:
+  case IR_SHL:
+  case IR_SHR:
+    if (ins->nv != 2 || ins->type != IR_INT) {
+      return 0;
+    }
+    if (!const_int(ins->v[0], &a) || !const_int(ins->v[1], &b)) {
+      return 0;
+    }
+    /* Bitwise ops wrap and mask like the backend: always safe to fold. */
+    if (ins->op == IR_AND) {
+      return make_const(ins, ir_imm_i(a & b, IR_INT));
+    }
+    if (ins->op == IR_OR) {
+      return make_const(ins, ir_imm_i(a | b, IR_INT));
+    }
+    if (ins->op == IR_XOR) {
+      return make_const(ins, ir_imm_i(a ^ b, IR_INT));
+    }
+    {
+      unsigned long long ua = (unsigned long long)a;
+      unsigned long long count = (unsigned long long)b & 63u;
+      long long r;
+      if (ins->op == IR_SHL) {
+        r = (long long)(ua << count);
+      } else if (a >= 0) {
+        r = (long long)(ua >> count);
+      } else {
+        /* Arithmetic shift of a negative: shift the inverted bits. */
+        r = ~((long long)((~ua) >> count));
+      }
+      return make_const(ins, ir_imm_i(r, IR_INT));
+    }
   case IR_ADD:
   case IR_SUB:
   case IR_MUL:

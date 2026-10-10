@@ -1016,6 +1016,16 @@ static void gen_array_decl(BuildCtx *ctx, Node *node) {
     irb_emit(ctx, st);
     return;
   }
+  /* args() (the only array-producing call): alias its block. */
+  if (rhs != NULL && rhs->type == NODE_FUNC_CALL) {
+    IrVal v = irb_expr(ctx, rhs);
+    IrInstr st = ir_instr(IR_STORE);
+    st.v[0] = ir_var(slot, IR_ARR);
+    st.v[1] = v;
+    st.nv = 2;
+    irb_emit(ctx, st);
+    return;
+  }
   SemType elem = ST_INT;
   for (int i = 0; i < ctx->nvars; i++) {
     if (ctx->vars[i].slot == slot) {

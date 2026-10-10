@@ -1,0 +1,12 @@
+// Stress: out-of-range char() traps (exit 3) identically at every level.
+fn public pick(num n) -> str {
+  return(char(self.n));
+}
+
+fn public main() {
+  print(pick(999));
+  print("\n");
+  return(0);
+}
+
+main();

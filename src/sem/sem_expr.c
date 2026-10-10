@@ -3,12 +3,14 @@
 /**
  * @brief Tells whether a call name is a builtin runtime operation
  * @param name Call name
- * @return Non-zero for input, len, tostr, tonum, readFile, writeFile
+ * @return Non-zero for input, len, tostr, tonum, readFile, writeFile,
+ * char, args
  */
 static int is_builtin(const char *name) {
   return strcmp(name, "input") == 0 || strcmp(name, "len") == 0 ||
          strcmp(name, "tostr") == 0 || strcmp(name, "tonum") == 0 ||
-         strcmp(name, "readFile") == 0 || strcmp(name, "writeFile") == 0;
+         strcmp(name, "readFile") == 0 || strcmp(name, "writeFile") == 0 ||
+         strcmp(name, "char") == 0 || strcmp(name, "args") == 0;
 }
 
 /**
@@ -155,6 +157,12 @@ SemType sem_peek(Node *node) {
     }
     if (strcmp(nm, "readFile") == 0) {
       return ST_STR;
+    }
+    if (strcmp(nm, "char") == 0) {
+      return ST_STR;
+    }
+    if (strcmp(nm, "args") == 0) {
+      return ST_ARR;
     }
     SemProg *sp = sem_prog();
     for (int s = 0; s < sp->nfuncs; s++) {
@@ -335,6 +343,18 @@ static int op_is(const char *op, const char *want) {
 static int is_comparison_op(const char *op) {
   return op_is(op, "==") || op_is(op, "!=") || op_is(op, "<") ||
          op_is(op, ">") || op_is(op, "<=") || op_is(op, ">=");
+}
+
+/**
+ * @brief Tells whether an operator is a bitwise operation
+ * @param op Operator text
+ * @return Non-zero for &, |, ^, <<, >>, ~
+ * @details Bitwise ops work on raw 64-bit patterns: ints only, wrapping
+ * (no overflow traps), shift counts masked to 0-63.
+ */
+static int is_bitwise_op(const char *op) {
+  return op_is(op, "&") || op_is(op, "|") || op_is(op, "^") ||
+         op_is(op, "<<") || op_is(op, ">>") || op_is(op, "~");
 }
 
 /**
@@ -610,7 +630,8 @@ static SemType touch_binary(Node *node) {
   SemType lt = sem_peek(node->binary_op.left);
   SemType rt = sem_peek(node->binary_op.right);
   if (!op_is(op, "+") && !op_is(op, "-") && !op_is(op, "*") &&
-      !op_is(op, "/") && !op_is(op, "%") && !is_comparison_op(op)) {
+      !op_is(op, "/") && !op_is(op, "%") && !is_comparison_op(op) &&
+      !is_bitwise_op(op)) {
     sem_error(node, "Unsupported operator '%s' in codegen", op);
   }
   if (is_comparison_op(op)) {
@@ -638,6 +659,28 @@ static SemType touch_binary(Node *node) {
     sem_touch(node->binary_op.left);
     sem_touch(node->binary_op.right);
     return ST_BOOL;
+  }
+  if (is_bitwise_op(op)) {
+    if (lt == ST_NULL || rt == ST_NULL) {
+      sem_error(node, "Operator '%s' cannot be applied to null", op);
+    }
+    if (lt == ST_STR || rt == ST_STR) {
+      SemType bad = (lt == ST_STR) ? lt : rt;
+      sem_error(node, "Operator '%s' cannot be applied to %s", op,
+                sem_type_name(bad));
+    }
+    if (!sem_is_numeric(lt) || !sem_is_numeric(rt)) {
+      SemType bad = !sem_is_numeric(lt) ? lt : rt;
+      sem_error(node, "Operator '%s' cannot be applied to %s", op,
+                sem_type_name(bad));
+    }
+    if (lt == ST_FLOAT || rt == ST_FLOAT) {
+      sem_error(node, "Operator '%s' cannot be applied to float", op);
+    }
+    sem_record_type(node, ST_INT, NULL);
+    sem_touch(node->binary_op.left);
+    sem_touch(node->binary_op.right);
+    return ST_INT;
   }
   if (lt == ST_NULL || rt == ST_NULL) {
     sem_error(node, "Operator '%s' cannot be applied to null", op);
@@ -955,7 +998,7 @@ static SemType touch_builtin_call(Node *node) {
     }
     if (args != NULL) {
       SemType given = sem_validate(args);
-      if (given != ST_STR) {
+      if (given != ST_STR && given != ST_ARR) {
         sem_error(args, "len expects a str, got %s", sem_type_name(given));
       }
       sem_touch(args);
@@ -1005,6 +1048,27 @@ static SemType touch_builtin_call(Node *node) {
     }
     sem_record_type(node, ST_STR, NULL);
     return ST_STR;
+  }
+  if (strcmp(name, "char") == 0) {
+    if (nargs != 1) {
+      sem_error(node, "char takes exactly 1 argument");
+    }
+    if (args != NULL) {
+      SemType given = sem_validate(args);
+      if (!sem_is_numeric(given)) {
+        sem_error(args, "char expects a num, got %s", sem_type_name(given));
+      }
+      sem_touch(args);
+    }
+    sem_record_type(node, ST_STR, NULL);
+    return ST_STR;
+  }
+  if (strcmp(name, "args") == 0) {
+    if (nargs != 0) {
+      sem_error(node, "args takes no arguments");
+    }
+    sem_record_type(node, ST_ARR, NULL);
+    return ST_ARR;
   }
   if (nargs != 2) {
     sem_error(node, "writeFile takes exactly 2 arguments");

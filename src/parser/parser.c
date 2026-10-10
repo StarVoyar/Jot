@@ -35,6 +35,9 @@ static int import_done_count;
 /** Forward declaration for recursive parsing */
 static Node *parse_expression();
 
+/** Forward declaration for primary parsing (used by unary ~) */
+static Node *parse_primary();
+
 /** Forward declaration for statement parsing */
 static Node *parse_statement();
 
@@ -965,6 +968,38 @@ static Node *parse_primary_base() {
     minus->binary_op.right = operand;
     return minus;
   }
+  /* Bitwise NOT. Modelled as a binary "~" with a dummy 0 left operand so
+     every generic AST walk keeps working; sem and IR only read the right
+     operand and emit a single NOT. Takes a full primary (unlike unary
+     minus) so ~self.flags and ~a[0] work. */
+  if (current_token->type == OPERATOR &&
+      strcmp(current_token->value, "~") == 0) {
+    Node *inv = create_node(NODE_BINARY_OP);
+    inv->binary_op.op = malloc(2);
+    memcpy(inv->binary_op.op, "~", 2);
+    Node *zero = create_node(NODE_INT_LITERAL);
+    zero->int_literal.value = 0;
+    current_token++;
+    Node *operand = parse_primary();
+    if (operand == NULL) {
+      return NULL;
+    }
+    inv->binary_op.left = zero;
+    inv->binary_op.right = operand;
+    return inv;
+  }
+  /* 'char' is a keyword type, but char(...) is the builtin call. */
+  if (current_token->type == KEYWORD &&
+      strcmp(current_token->value, "char") == 0 &&
+      current_token[1].value != NULL &&
+      strcmp(current_token[1].value, "(") == 0) {
+    Node *node = create_node(NODE_FUNC_CALL);
+    node->func_call.name = malloc(5);
+    memcpy(node->func_call.name, "char", 5);
+    current_token++;
+    node->func_call.args = parse_call_arguments();
+    return node;
+  }
   if (current_token->type == INT) {
     return parse_int_literal();
   } else if (current_token->type == FLOAT) {
@@ -1168,11 +1203,36 @@ static Node *parse_additive() {
 }
 
 /**
+ * @brief Parses << and >> (left-associative, below additive)
+ * @return AST node for expression
+ */
+static Node *parse_shift() {
+  Node *left = parse_additive();
+  if (left == NULL) {
+    return NULL;
+  }
+
+  while (current_token->type == OPERATOR &&
+         (strcmp(current_token->value, "<<") == 0 ||
+          strcmp(current_token->value, ">>") == 0)) {
+    Node *op = take_operator(left);
+    Node *right = parse_additive();
+    if (right == NULL) {
+      return NULL;
+    }
+    op->binary_op.right = right;
+    left = op;
+  }
+
+  return left;
+}
+
+/**
  * @brief Parses <, >, <= and >= (left-associative)
  * @return AST node for expression
  */
 static Node *parse_relational() {
-  Node *left = parse_additive();
+  Node *left = parse_shift();
   if (left == NULL) {
     return NULL;
   }
@@ -1183,7 +1243,7 @@ static Node *parse_relational() {
           strcmp(current_token->value, "<=") == 0 ||
           strcmp(current_token->value, ">=") == 0)) {
     Node *op = take_operator(left);
-    Node *right = parse_additive();
+    Node *right = parse_shift();
     if (right == NULL) {
       return NULL;
     }
@@ -1223,10 +1283,82 @@ static Node *parse_equality() {
 }
 
 /**
+ * @brief Parses & (left-associative, below equality)
+ * @return AST node for expression
+ */
+static Node *parse_bitand() {
+  Node *left = parse_equality();
+  if (left == NULL) {
+    return NULL;
+  }
+
+  while (current_token->type == OPERATOR &&
+         strcmp(current_token->value, "&") == 0) {
+    Node *op = take_operator(left);
+    Node *right = parse_equality();
+    if (right == NULL) {
+      return NULL;
+    }
+    op->binary_op.right = right;
+    left = op;
+  }
+
+  return left;
+}
+
+/**
+ * @brief Parses ^ (left-associative, below &)
+ * @return AST node for expression
+ */
+static Node *parse_bitxor() {
+  Node *left = parse_bitand();
+  if (left == NULL) {
+    return NULL;
+  }
+
+  while (current_token->type == OPERATOR &&
+         strcmp(current_token->value, "^") == 0) {
+    Node *op = take_operator(left);
+    Node *right = parse_bitand();
+    if (right == NULL) {
+      return NULL;
+    }
+    op->binary_op.right = right;
+    left = op;
+  }
+
+  return left;
+}
+
+/**
+ * @brief Parses | (left-associative, below ^)
+ * @return AST node for expression
+ */
+static Node *parse_bitor() {
+  Node *left = parse_bitxor();
+  if (left == NULL) {
+    return NULL;
+  }
+
+  while (current_token->type == OPERATOR &&
+         strcmp(current_token->value, "|") == 0) {
+    Node *op = take_operator(left);
+    Node *right = parse_bitxor();
+    if (right == NULL) {
+      return NULL;
+    }
+    op->binary_op.right = right;
+    left = op;
+  }
+
+  return left;
+}
+
+/**
  * @brief Parses an expression with binary operations
  * @return AST node for expression
  */
-static Node *parse_expression() { return parse_equality(); }
+static Node *parse_expression() { return parse_bitor(); }
 
 /**
  * @brief Parses a return statement
@@ -2414,7 +2546,9 @@ static Node *parse_method_def() {
       strcmp(node->method_def.name, "tostr") == 0 ||
       strcmp(node->method_def.name, "tonum") == 0 ||
       strcmp(node->method_def.name, "readFile") == 0 ||
-      strcmp(node->method_def.name, "writeFile") == 0) {
+      strcmp(node->method_def.name, "writeFile") == 0 ||
+      strcmp(node->method_def.name, "char") == 0 ||
+      strcmp(node->method_def.name, "args") == 0) {
     parse_error("Method name is reserved\n");
   }
   current_token++;
@@ -2754,7 +2888,9 @@ static Node *parse_function() {
       strcmp(node->function.name, "tostr") == 0 ||
       strcmp(node->function.name, "tonum") == 0 ||
       strcmp(node->function.name, "readFile") == 0 ||
-      strcmp(node->function.name, "writeFile") == 0) {
+      strcmp(node->function.name, "writeFile") == 0 ||
+      strcmp(node->function.name, "char") == 0 ||
+      strcmp(node->function.name, "args") == 0) {
     parse_error("Function name is reserved, use another name\n");
   }
   check_reserved_ident(node->function.name);
@@ -3248,7 +3384,9 @@ Node *Parser(Token *tokens, const char *filename) {
           strcmp(calls[k]->func_call.name, "tostr") == 0 ||
           strcmp(calls[k]->func_call.name, "tonum") == 0 ||
           strcmp(calls[k]->func_call.name, "readFile") == 0 ||
-          strcmp(calls[k]->func_call.name, "writeFile") == 0) {
+          strcmp(calls[k]->func_call.name, "writeFile") == 0 ||
+          strcmp(calls[k]->func_call.name, "char") == 0 ||
+          strcmp(calls[k]->func_call.name, "args") == 0) {
         continue;
       }
       Node *def = find_function_in(program_head, calls[k]->func_call.name);

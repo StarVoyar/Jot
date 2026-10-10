@@ -630,6 +630,122 @@ static void sel_arith_float(IrInstr *ins) {
 }
 
 /**
+ * @brief Emits bitwise integer ops (no overflow traps: raw 64-bit patterns)
+ * @param ins Bitwise instruction (integer-typed, shifts mask counts to 0-63)
+ * @details Variable shift counts use cl with rcx saved/restored around the
+ * sequence (rcx may hold a live temp); no calls occur between push and pop.
+ */
+static void sel_bits_int(IrInstr *ins) {
+  int ti = ins->dst - xf->nvars;
+  int dst_reg =
+      (ti >= 0 && ti < xa->ntemps && xa->temps[ti].is_reg)
+          ? xa->temps[ti].reg
+          : -1;
+  Op l = op_of(ins->v[0]);
+  if (ins->op == IR_NOT) {
+    if (dst_reg >= 0) {
+      load_reg(l, dst_reg);
+      fprintf(xo, "  not %s\n", reg_name(dst_reg));
+    } else if (l.is_mem && l.slot == ins->dst) {
+      fprintf(xo, "  not qword [rbp - %d]\n", slot_off(l.slot));
+    } else {
+      load_rax(l);
+      fprintf(xo, "  not rax\n");
+      store_slot(ins->dst);
+    }
+    return;
+  }
+  Op r = op_of(ins->v[1]);
+  const char *opname = "and";
+  if (ins->op == IR_OR) {
+    opname = "or";
+  } else if (ins->op == IR_XOR) {
+    opname = "xor";
+  } else if (ins->op == IR_SHL) {
+    opname = "shl";
+  } else if (ins->op == IR_SHR) {
+    opname = "sar";
+  }
+  int is_shift = ins->op == IR_SHL || ins->op == IR_SHR;
+  long long count = r.is_imm ? (r.imm & 63) : 0;
+  /* Destination-register form computes in place. */
+  if (dst_reg >= 0) {
+    if (is_shift) {
+      fprintf(xo, "  push rcx\n");
+      if (dst_reg == R_RCX) {
+        load_rax(l);
+        load_reg(r, R_RCX);
+        fprintf(xo, "  %s rax, cl\n", opname);
+        fprintf(xo, "  pop rcx\n");
+        fprintf(xo, "  mov rcx, rax\n");
+      } else {
+        if (!(l.is_reg && l.reg == dst_reg)) {
+          load_reg(l, dst_reg);
+        }
+        load_reg(r, R_RCX);
+        fprintf(xo, "  %s %s, cl\n", opname, reg_name(dst_reg));
+        fprintf(xo, "  pop rcx\n");
+      }
+      return;
+    }
+    if (r.is_reg && r.reg == dst_reg) {
+      load_reg(l, R_RAX);
+      fprintf(xo, "  %s rax, %s\n", opname, reg_name(dst_reg));
+      fprintf(xo, "  mov %s, rax\n", reg_name(dst_reg));
+    } else {
+      if (!(l.is_reg && l.reg == dst_reg)) {
+        load_reg(l, dst_reg);
+      }
+      if (r.is_imm && imm32(r.imm)) {
+        fprintf(xo, "  %s %s, %lld\n", opname, reg_name(dst_reg), r.imm);
+      } else if (r.is_mem) {
+        fprintf(xo, "  %s %s, [rbp - %d]\n", opname, reg_name(dst_reg),
+                slot_off(r.slot));
+      } else if (r.is_global) {
+        fprintf(xo, "  %s %s, [rel global_%s]\n", opname,
+                reg_name(dst_reg), xm->globals[r.gidx].name);
+      } else {
+        load_reg(r, R_RBX);
+        fprintf(xo, "  %s %s, rbx\n", opname, reg_name(dst_reg));
+      }
+    }
+    return;
+  }
+  /* Memory-destination form for same-address stores (no load/store). */
+  if (l.is_mem && ins->dst == l.slot) {
+    if (r.is_imm && (is_shift || imm32(r.imm))) {
+      fprintf(xo, "  %s qword [rbp - %d], %lld\n", opname, slot_off(l.slot),
+              is_shift ? count : r.imm);
+      return;
+    }
+    if (!is_shift && r.is_reg) {
+      fprintf(xo, "  %s qword [rbp - %d], %s\n", opname, slot_off(l.slot),
+              reg_name(r.reg));
+      return;
+    }
+  }
+  if (is_shift && !r.is_imm) {
+    /* Variable count through cl; rcx may hold a live temp. */
+    fprintf(xo, "  push rcx\n");
+    load_rax(l);
+    load_reg(r, R_RCX);
+    fprintf(xo, "  %s rax, cl\n", opname);
+    fprintf(xo, "  pop rcx\n");
+    store_slot(ins->dst);
+    return;
+  }
+  arith_operand(r, 1);
+  arith_operand(l, 0);
+  if (is_shift) {
+    fprintf(xo, "  mov rcx, rbx\n");
+    fprintf(xo, "  %s rax, cl\n", opname);
+  } else {
+    fprintf(xo, "  %s rax, rbx\n", opname);
+  }
+  store_slot(ins->dst);
+}
+
+/**
  * @brief Emits an integer setcc sequence with 0/1 result
  * @param cond Comparison condition
  * @param dst_reg Destination register, or -1 for a frame slot
@@ -1284,6 +1400,118 @@ static void sel_write_file(IrInstr *ins) {
 }
 
 /**
+ * @brief Emits char (code to 1-byte heap string, traps outside 0-255)
+ * @param ins Chr instruction (list[0] is the code)
+ * @details Float codes truncate toward zero first (NaN and out-of-range
+ * magnitudes trap via the range check, matching cvttsd2si saturation).
+ */
+static void sel_chr(IrInstr *ins) {
+  Op a = op_of(ins->list[0]);
+  if (a.type == IR_FLOAT) {
+    load_xmm(a, R_XMM0);
+    fprintf(xo, "  cvttsd2si rax, xmm0\n");
+  } else {
+    load_rax(a);
+  }
+  fprintf(xo, "  cmp rax, 0\n");
+  fprintf(xo, "  jl char_trap\n");
+  fprintf(xo, "  cmp rax, 255\n");
+  fprintf(xo, "  jg char_trap\n");
+  fprintf(xo, "  sub rsp, 64\n");
+  fprintf(xo, "  mov [rsp + 0], rax\n");
+  fprintf(xo, "  mov %s, 2\n", areg(0));
+  gen_runtime_prologue();
+  extcall("malloc");
+  gen_runtime_epilogue();
+  fprintf(xo, "  test rax, rax\n");
+  fprintf(xo, "  jz alloc_trap\n");
+  fprintf(xo, "  mov rbx, [rsp + 0]\n");
+  fprintf(xo, "  mov [rax], bl\n");
+  fprintf(xo, "  mov byte [rax + 1], 0\n");
+  fprintf(xo, "  add rsp, 64\n");
+  int ti = ins->dst - xf->nvars;
+  if (ti >= 0 && ti < xa->ntemps && xa->temps[ti].is_reg) {
+    fprintf(xo, "  mov %s, rax\n", reg_name(xa->temps[ti].reg));
+  } else {
+    store_slot(ins->dst);
+  }
+}
+
+/** Sequence counter for per-site loop labels (args array builder) */
+static int x_seq = 0;
+
+/**
+ * @brief Emits args (command-line arguments to a heap string array)
+ * @param ins Args instruction (no operands; reads jot_argc/jot_argv)
+ * @details Duplicates every argv entry into fresh heap strings so the
+ * array owns its memory; element 0 is the program name per C convention.
+ */
+static void sel_args(IrInstr *ins) {
+  int seq = x_seq++;
+  fprintf(xo, "  mov rax, [rel jot_argc]\n");
+  fprintf(xo, "  mov rbx, [rel jot_argv]\n");
+  fprintf(xo, "  sub rsp, 64\n");
+  fprintf(xo, "  mov [rsp + 0], rax\n");
+  fprintf(xo, "  mov [rsp + 8], rbx\n");
+  fprintf(xo, "  mov rax, [rsp + 0]\n");
+  fprintf(xo, "  add rax, 1\n");
+  fprintf(xo, "  jo overflow_trap\n");
+  fprintf(xo, "  shl rax, 3\n");
+  fprintf(xo, "  mov %s, rax\n", areg(0));
+  gen_runtime_prologue();
+  extcall("malloc");
+  gen_runtime_epilogue();
+  fprintf(xo, "  test rax, rax\n");
+  fprintf(xo, "  jz alloc_trap\n");
+  fprintf(xo, "  mov [rsp + 16], rax\n");
+  fprintf(xo, "  mov r10, [rsp + 0]\n");
+  fprintf(xo, "  mov [rax], r10\n");
+  fprintf(xo, "  mov qword [rsp + 24], 0\n");
+  fprintf(xo, "args_loop%d:\n", seq);
+  fprintf(xo, "  mov r10, [rsp + 24]\n");
+  fprintf(xo, "  cmp r10, [rsp + 0]\n");
+  fprintf(xo, "  jge args_done%d\n", seq);
+  fprintf(xo, "  mov r11, [rsp + 8]\n");
+  fprintf(xo, "  mov rax, [r11 + r10*8]\n");
+  fprintf(xo, "  mov [rsp + 32], rax\n");
+  fprintf(xo, "  mov %s, rax\n", areg(0));
+  gen_runtime_prologue();
+  extcall("strlen");
+  gen_runtime_epilogue();
+  fprintf(xo, "  mov [rsp + 40], rax\n");
+  fprintf(xo, "  mov %s, rax\n", areg(0));
+  fprintf(xo, "  add %s, 1\n", areg(0));
+  gen_runtime_prologue();
+  extcall("malloc");
+  gen_runtime_epilogue();
+  fprintf(xo, "  test rax, rax\n");
+  fprintf(xo, "  jz alloc_trap\n");
+  fprintf(xo, "  mov [rsp + 48], rax\n");
+  fprintf(xo, "  mov %s, [rsp + 48]\n", areg(0));
+  fprintf(xo, "  mov %s, [rsp + 32]\n", areg(1));
+  fprintf(xo, "  mov %s, [rsp + 40]\n", areg(2));
+  fprintf(xo, "  add %s, 1\n", areg(2));
+  gen_runtime_prologue();
+  extcall("memcpy");
+  gen_runtime_epilogue();
+  fprintf(xo, "  mov r10, [rsp + 16]\n");
+  fprintf(xo, "  mov r11, [rsp + 24]\n");
+  fprintf(xo, "  mov rax, [rsp + 48]\n");
+  fprintf(xo, "  mov [r10 + r11*8 + 8], rax\n");
+  fprintf(xo, "  inc qword [rsp + 24]\n");
+  fprintf(xo, "  jmp args_loop%d\n", seq);
+  fprintf(xo, "args_done%d:\n", seq);
+  fprintf(xo, "  mov rax, [rsp + 16]\n");
+  fprintf(xo, "  add rsp, 64\n");
+  int ti = ins->dst - xf->nvars;
+  if (ti >= 0 && ti < xa->ntemps && xa->temps[ti].is_reg) {
+    fprintf(xo, "  mov %s, rax\n", reg_name(xa->temps[ti].reg));
+  } else {
+    store_slot(ins->dst);
+  }
+}
+
+/**
  * @brief Concatenates two strings, result left in rax
  * @details IN: rax holds left pointer, rbx holds right pointer, rsp aligned.
  * Allocates len1+len2+1 bytes and copies both parts including the NUL.
@@ -1855,6 +2083,14 @@ static int sel_instr(int fi, int bi, int k, IrInstr *ins, int is_entry) {
       sel_arith_int(ins);
     }
     break;
+  case IR_AND:
+  case IR_OR:
+  case IR_XOR:
+  case IR_SHL:
+  case IR_SHR:
+  case IR_NOT:
+    sel_bits_int(ins);
+    break;
   case IR_CMP: {
     /* Fuse an immediately following branch on a single-use result. */
     if (k + 1 < blk->nins) {
@@ -1978,6 +2214,12 @@ static int sel_instr(int fi, int bi, int k, IrInstr *ins, int is_entry) {
   case IR_WRITEFILE:
     sel_write_file(ins);
     break;
+  case IR_CHR:
+    sel_chr(ins);
+    break;
+  case IR_ARGS:
+    sel_args(ins);
+    break;
   case IR_NEWARR:
     sel_newarr(ins);
     break;
@@ -2061,6 +2303,15 @@ void x86_emit_func(IrModule *m, IrFunc *f, int fi, int is_entry,
   x_npush = npush;
   fprintf(out, "%s:\n", f->label);
   if (is_entry) {
+    /* C main(argc, argv) arrives in the first two argument registers on
+       both targets; stash them for the args() builtin before anything
+       clobbers them. argc is 32-bit, so zero-extend it first. */
+    fprintf(out, "  mov %s, %s\n", reg_name32(xt->arg_regs[0]),
+            reg_name32(xt->arg_regs[0]));
+    fprintf(out, "  mov [rel jot_argc], %s\n",
+            reg_name(xt->arg_regs[0]));
+    fprintf(out, "  mov [rel jot_argv], %s\n",
+            reg_name(xt->arg_regs[1]));
     fprintf(out, "  mov rax, rsp\n");
     fprintf(out, "  sub rax, 262144\n");
     fprintf(out, "  mov [rel stack_floor], rax\n");
@@ -2144,7 +2395,10 @@ void x86_data_section(IrModule *m, FILE *out) {
   fprintf(out, "  fmt_open_r db \"rb\", 0\n");
   fprintf(out, "  fmt_open_w db \"wb\", 0\n");
   fprintf(out, "  fmt_openfail db \"could not open file\", 10, 0\n");
+  fprintf(out, "  fmt_char db \"invalid char code\", 10, 0\n");
   fprintf(out, "  stack_floor dq 0\n");
+  fprintf(out, "  jot_argc dq 0\n");
+  fprintf(out, "  jot_argv dq 0\n");
   for (int i = 0; i < m->nglobals; i++) {
     fprintf(out, "  global_%s dq 0\n", m->globals[i].name);
   }
@@ -2268,6 +2522,7 @@ void x86_emit_traps(const Target *t, FILE *out) {
   x86_trap("alloc_trap", "fmt_alloc");
   x86_trap("null_trap", "fmt_null");
   x86_trap("open_trap", "fmt_openfail");
+  x86_trap("char_trap", "fmt_char");
 }
 
 void x86_emit_halt(const Target *t, FILE *out) {

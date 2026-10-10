@@ -39,6 +39,12 @@ typedef enum {
   IR_MUL,        /**< Integer or float multiplication (traps on overflow) */
   IR_DIV,        /**< Integer (traps on zero) or float division */
   IR_MOD,        /**< Integer remainder (traps on zero) */
+  IR_AND,        /**< Integer bitwise AND (wraps, never traps) */
+  IR_OR,         /**< Integer bitwise OR (wraps, never traps) */
+  IR_XOR,        /**< Integer bitwise XOR (wraps, never traps) */
+  IR_SHL,        /**< Integer shift left (count masked to 0-63, wraps) */
+  IR_SHR,        /**< Arithmetic shift right (count masked to 0-63) */
+  IR_NOT,        /**< Integer bitwise NOT (single operand in v[0]) */
   IR_CMP,        /**< Comparison, result is 0 or 1 */
   IR_I2F,        /**< Integer bits to double */
   IR_F2I,        /**< Double to integer by truncation */
@@ -61,6 +67,8 @@ typedef enum {
   IR_TONUM,      /**< String to double */
   IR_READFILE,   /**< Whole file to heap string */
   IR_WRITEFILE,  /**< Text to file, result is bytes written */
+  IR_CHR,        /**< Character code to 1-byte heap string (traps out of range) */
+  IR_ARGS,       /**< Command-line arguments to heap string array */
   IR_NEWARR,     /**< Allocate and fill an array block */
   IR_ARR_LOAD,   /**< Bounds-checked element load */
   IR_ARR_STORE,  /**< Bounds-checked element store (op in aux) */

@@ -211,6 +211,18 @@ static const char *dump_op(IrOp op) {
     return "div";
   case IR_MOD:
     return "mod";
+  case IR_AND:
+    return "and";
+  case IR_OR:
+    return "or";
+  case IR_XOR:
+    return "xor";
+  case IR_SHL:
+    return "shl";
+  case IR_SHR:
+    return "shr";
+  case IR_NOT:
+    return "not";
   case IR_CMP:
     return "cmp";
   case IR_I2F:
@@ -255,6 +267,10 @@ static const char *dump_op(IrOp op) {
     return "readfile";
   case IR_WRITEFILE:
     return "writefile";
+  case IR_CHR:
+    return "chr";
+  case IR_ARGS:
+    return "args";
   case IR_NEWARR:
     return "newarr";
   case IR_ARR_LOAD:
@@ -396,7 +412,9 @@ static void dump_instr(IrFunc *f, IrInstr *ins, FILE *out) {
       dump_val(f, ins->list[i], out);
     }
     if (ins->op == IR_ADD || ins->op == IR_SUB || ins->op == IR_MUL ||
-        ins->op == IR_DIV || ins->op == IR_MOD) {
+        ins->op == IR_DIV || ins->op == IR_MOD || ins->op == IR_AND ||
+        ins->op == IR_OR || ins->op == IR_XOR || ins->op == IR_SHL ||
+        ins->op == IR_SHR || ins->op == IR_NOT) {
       fprintf(out, " <%s>", dump_type(ins->type));
     }
   } else if (ins->op == IR_CALL || ins->op == IR_CALLM) {

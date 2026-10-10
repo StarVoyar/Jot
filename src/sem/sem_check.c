@@ -980,6 +980,13 @@ static void check_array_decl(Node *node) {
     sem_touch(rhs);
     return;
   }
+  /* args() is the only call producing an array: alias its str block. */
+  if (rhs != NULL && rhs->type == NODE_FUNC_CALL &&
+      strcmp(rhs->func_call.name, "args") == 0) {
+    sem_scope.vars[slot].elem = ST_STR;
+    sem_touch(rhs);
+    return;
+  }
   if (rhs == NULL || rhs->type != NODE_ARRAY_LITERAL) {
     sem_error(node, "Array must be initialized with [...] or another array");
   }
