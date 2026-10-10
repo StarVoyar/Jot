@@ -536,9 +536,14 @@ static void sync_after_error(void) {
  */
 static Node *try_parse_statement(void) {
   Node *stmt = NULL;
+  /* Save the enclosing buffer: without this, an error in outer code after
+     a nested recovery longjmps into a returned frame (stack garbage). */
+  jmp_buf saved;
+  memcpy(saved, stmt_jmp, sizeof(saved));
   if (setjmp(stmt_jmp) == 0) {
     stmt = parse_statement();
   }
+  memcpy(stmt_jmp, saved, sizeof(stmt_jmp));
   return stmt;
 }
 
@@ -2903,7 +2908,10 @@ static Node *parse_function() {
   int name_width = token_width();
   current_token++;
 
-  if (strcmp(current_token->value, "(") != 0) {
+  /* A desynced stream can end here (e.g. an unterminated string swallowed
+     the rest of the file): report instead of crashing on the sentinel. */
+  if (current_token->type == END_OF_TOKENS || current_token->value == NULL ||
+      strcmp(current_token->value, "(") != 0) {
     parse_error_expected("Expected '(' after function name\n");
   }
   current_token++;

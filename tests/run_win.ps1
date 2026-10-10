@@ -1,7 +1,9 @@
 # Jot compiler test runner (Windows).
 # Builds jotc, then checks every examples/**/*.jot and tests/stress/*.jot
-# produces byte-identical output at -O0, -O1 and -O2, plus CLI smoke tests.
-# No checked-in baselines: the three optimization levels must agree.
+# produces byte-identical output at -O0, -O1 and -O2, plus a generated
+# ~80k-token file (token-buffer growth), an unterminated-string expect-fail
+# check, and CLI smoke tests. No checked-in baselines: the three
+# optimization levels must agree.
 # Usage: powershell -File tests/run_win.ps1  (run from the repo root)
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -19,6 +21,25 @@ $pass = 0; $fail = 0
 $files = @()
 $files += Get-ChildItem -Recurse (Join-Path $root "examples") -Filter *.jot
 $files += Get-ChildItem (Join-Path $root "tests/stress") -Filter *.jot
+# Crash-regression: ~80k tokens forces token-buffer growth past the old
+# 65536 cap. Generated here (not committed) to keep the repo lean.
+$bt = Join-Path $tmp "bigtokens.jot"
+$sb = New-Object System.Text.StringBuilder
+1..1500 | ForEach-Object {
+  [void]$sb.Append("fn public g$_" + "(num a) -> num {`n  num t = self.a;`n")
+  1..8 | ForEach-Object { [void]$sb.Append("  t += $_;`n") }
+  [void]$sb.Append("  return(t);`n}`n")
+}
+[void]$sb.Append("fn public main() {`n  num t = 0;`n")
+1..1500 | ForEach-Object { [void]$sb.Append("  t += g$_(1);`n") }
+[void]$sb.Append("  print(t);`n  print(`"\n`");`n  return(0);`n}`nmain();`n")
+[System.IO.File]::WriteAllText($bt, $sb.ToString())
+$files += Get-Item $bt
+# Crash-regression: an unterminated string must error (exit 1), never crash.
+$unterm = Join-Path $tmp "unterm.jot"
+Set-Content -Path $unterm -Value 'fn public main() { print("abc); return(0); } main();' -NoNewline -Encoding ASCII
+& $jotc $unterm (Join-Path $tmp "unterm.asm") -O1 >$null 2>$null
+if ($LASTEXITCODE -eq 1) { $pass++ } else { Write-Output "FAIL unterm exit=$LASTEXITCODE"; $fail++ }
 foreach ($f in $files) {
   $tag = $f.Directory.Name + "/" + $f.BaseName
   $outs = @()

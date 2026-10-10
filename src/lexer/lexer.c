@@ -30,6 +30,30 @@ static int loaded_count = 0;
 /** Name to record for the next Lexer call */
 static const char *pending_file_name;
 
+static void lex_oom(void) {
+  fprintf(stderr, "jotc: out of memory\n");
+  exit(1);
+}
+
+/**
+ * @brief Appends a byte to a growing text buffer, doubling when full
+ * @param buf Buffer (reallocated as needed)
+ * @param len Used length (incremented)
+ * @param cap Capacity (doubled on growth)
+ * @param c Byte to append
+ */
+static void buf_push(char **buf, size_t *len, size_t *cap, char c) {
+  if (*len + 1 >= *cap) {
+    *cap *= 2;
+    char *grown = realloc(*buf, *cap);
+    if (grown == NULL) {
+      lex_oom();
+    }
+    *buf = grown;
+  }
+  (*buf)[(*len)++] = c;
+}
+
 void lexer_set_file_name(const char *file) { pending_file_name = file; }
 
 /**
@@ -65,9 +89,14 @@ Token *Lexer(FILE *file) {
   fseek(file, 0, SEEK_SET);
 
   size_t size = (size_t)length;
-  unsigned char *buffer = malloc(size + 1);
+  /* Two trailing NULs: every +1 lookahead in the lexer stays in bounds. */
+  unsigned char *buffer = malloc(size + 2);
+  if (buffer == NULL) {
+    lex_oom();
+  }
   size_t bytes_read = fread(buffer, 1, size, file);
   buffer[bytes_read] = '\0';
+  buffer[bytes_read + 1] = '\0';
 
   fclose(file);
 
@@ -80,8 +109,23 @@ Token *Lexer(FILE *file) {
   line_start = 0;
 
   Token *tokens = malloc(65536 * sizeof(Token));
+  if (tokens == NULL) {
+    lex_oom();
+  }
+  size_t tok_cap = 65536;
 
   while (buffer[current_index] != '\0') {
+    /* One iteration emits at most one token; keep room for it plus two
+       end-of-tokens sentinels so large files grow instead of crashing and
+       lookahead past the end stays in bounds. */
+    if (tokens_index + 2 >= tok_cap) {
+      tok_cap *= 2;
+      Token *grown = realloc(tokens, tok_cap * sizeof(Token));
+      if (grown == NULL) {
+        lex_oom();
+      }
+      tokens = grown;
+    }
 
     char character = buffer[current_index];
     token_col = current_index - line_start + 1;
@@ -183,10 +227,16 @@ Token *Lexer(FILE *file) {
     }
   }
 
-  tokens[tokens_index].value = NULL;
-  tokens[tokens_index].type = END_OF_TOKENS;
-  tokens[tokens_index].line = token_line;
-  tokens[tokens_index].col = current_index - line_start + 1;
+  /* Two sentinels: lookahead past the end stays in bounds, and the empty
+     value keeps every strcmp in the parser defined (a desynced stream then
+     reports instead of crashing). The values are static and never freed. */
+  for (int s = 0; s < 2; s++) {
+    tokens[tokens_index].value = "";
+    tokens[tokens_index].type = END_OF_TOKENS;
+    tokens[tokens_index].line = token_line;
+    tokens[tokens_index].col = current_index - line_start + 1;
+    tokens_index++;
+  }
 
   return tokens;
 }
@@ -370,17 +420,21 @@ Token *lex_keyword(char current_char, int *current_index) {
   Token *token = malloc(sizeof(Token));
   token->line = token_line;
   token->col = token_col;
-  char keyword[32];
-  int keyword_index = 0;
+  size_t cap = 32;
+  size_t len = 0;
+  char *keyword = malloc(cap);
+  if (keyword == NULL) {
+    lex_oom();
+  }
 
   while ((isalnum(current_char) || current_char == '_') &&
-         current_char != '\0' && keyword_index < 31) {
-    keyword[keyword_index++] = current_char;
+         current_char != '\0') {
+    buf_push(&keyword, &len, &cap, current_char);
     (*current_index)++;
     current_char = global_buffer[*current_index];
   }
 
-  keyword[keyword_index] = '\0';
+  buf_push(&keyword, &len, &cap, '\0');
 
   if (strcmp(keyword, "return") == 0 || strcmp(keyword, "if") == 0 ||
       strcmp(keyword, "else") == 0 || strcmp(keyword, "while") == 0 ||
@@ -393,17 +447,10 @@ Token *lex_keyword(char current_char, int *current_index) {
       strcmp(keyword, "continue") == 0 || strcmp(keyword, "null") == 0 ||
       strcmp(keyword, "char") == 0 || strcmp(keyword, "global") == 0) {
     token->type = KEYWORD;
-    size_t len = strlen(keyword);
-    token->value = malloc(len + 1);
-    memcpy(token->value, keyword, len);
-    token->value[len] = '\0';
   } else {
     token->type = IDENTIFIER;
-    size_t len = strlen(keyword);
-    token->value = malloc(len + 1);
-    memcpy(token->value, keyword, len);
-    token->value[len] = '\0';
   }
+  token->value = keyword;
 
   return token;
 }
@@ -472,11 +519,15 @@ Token *lex_string(int *current_index) {
   token->col = token_col;
   (*current_index)++;
 
-  char string[256];
-  int string_index = 0;
+  size_t cap = 256;
+  size_t len = 0;
+  char *string = malloc(cap);
+  if (string == NULL) {
+    lex_oom();
+  }
   char current_char = global_buffer[*current_index];
 
-  while (current_char != '"' && current_char != '\0' && string_index < 255) {
+  while (current_char != '"' && current_char != '\0') {
     if (current_char == '\\' && global_buffer[*current_index + 1] != '\0') {
       char escape = global_buffer[*current_index + 1];
       char decoded = escape;
@@ -503,25 +554,24 @@ Token *lex_string(int *current_index) {
       }
       if (is_escape) {
         (*current_index) += 2;
-        string[string_index++] = decoded;
+        buf_push(&string, &len, &cap, decoded);
         current_char = global_buffer[*current_index];
         continue;
       }
-      /* Unknown escape: keep both characters, but never overflow the
-         buffer (the literal pass below copies them one at a time). */
+      /* Unknown escape: keep both characters, appended one at a time below. */
     }
-    string[string_index++] = current_char;
+    buf_push(&string, &len, &cap, current_char);
     (*current_index)++;
     current_char = global_buffer[*current_index];
   }
 
-  (*current_index)++;
-  string[string_index] = '\0';
+  if (current_char == '"') {
+    /* Consume the closing quote; at EOF the index already sits on NUL. */
+    (*current_index)++;
+  }
+  buf_push(&string, &len, &cap, '\0');
 
-  size_t len = strlen(string);
-  token->value = malloc(len + 1);
-  memcpy(token->value, string, len);
-  token->value[len] = '\0';
+  token->value = string;
   token->type = STRING;
   return token;
 }

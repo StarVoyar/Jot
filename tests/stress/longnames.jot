@@ -1,0 +1,13 @@
+fn public averylongfunctionnamefortesting12() -> num {
+  return(7);
+}
+fn public main() {
+  num abcdefghijklmnopqrstuvwxyz12345AA = 1;
+  num abcdefghijklmnopqrstuvwxyz12345BB = 2;
+  print(abcdefghijklmnopqrstuvwxyz12345AA + abcdefghijklmnopqrstuvwxyz12345BB);
+  print("\n");
+  print(averylongfunctionnamefortesting12());
+  print("\n");
+  return(0);
+}
+main();
