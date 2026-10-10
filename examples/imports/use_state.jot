@@ -1,0 +1,12 @@
+// Importing bump() pulls its global automatically.
+from [state.jot] import [bump];
+
+fn public main() {
+  print(bump());
+  print("\n");
+  print(bump());
+  print("\n");
+  return(0);
+}
+
+main();

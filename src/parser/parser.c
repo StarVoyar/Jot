@@ -42,6 +42,13 @@ static Node *parse_primary();
 static Node *parse_statement();
 
 /**
+ * @brief Deep-copies one AST node for import merging
+ * @param node Node to copy
+ * @return Copied node
+ */
+static Node *clone_node(Node *node);
+
+/**
  * @brief Parses a block of statements up to a closing brace
  * @return First statement in block (linked via right), NULL if empty
  */
@@ -190,6 +197,72 @@ static int display_span(int line, int from_col, int to_col) {
   }
   return end - start;
 }
+/**
+ * @brief Finds a global declaration by name
+ * @param root List to search
+ * @param name Global name to find
+ * @return Global VAR_DECL node or NULL
+ */
+static Node *find_global_in(Node *root, const char *name) {
+  for (Node *s = root; s != NULL; s = s->right) {
+    if (s->type == NODE_VAR_DECL && s->var_decl.is_global &&
+        strcmp(s->var_decl.name, name) == 0) {
+      return s;
+    }
+  }
+  return NULL;
+}
+
+/**
+ * @brief Merges one global from a source tree into the program
+ * @param sub_root Source file statements
+ * @param name Global name (known present in sub_root)
+ * @param line Column info for diagnostics
+ * @param col Column info for diagnostics
+ * @param width Squiggle width for diagnostics
+ * @details Same-origin re-merges (diamonds, star after explicit) are
+ * skipped by comparing node sources; different origins are duplicates.
+ */
+static void merge_one_global(Node *sub_root, const char *name, int line,
+                             int col, int width) {
+  Node *found = find_global_in(sub_root, name);
+  if (found == NULL) {
+    return;
+  }
+  Node *existing = find_global_in(program_head, name);
+  if (existing != NULL) {
+    if (existing->source != NULL && found->source != NULL &&
+        strcmp(existing->source, found->source) == 0) {
+      return;
+    }
+    char message[640];
+    snprintf(message, sizeof(message), "Global '%s' is already defined",
+             name);
+    parse_error_at(line, col, width, message);
+    return;
+  }
+  emit_statement(clone_node(found));
+}
+
+/**
+ * @brief Merges every global from a source tree into the program
+ * @param sub_root Source file statements
+ * @param line Column info for diagnostics
+ * @param col Column info for diagnostics
+ * @param width Squiggle width for diagnostics
+ * @details Globals travel with their file: importing anything from a file
+ * brings its globals, so merged functions keep resolving. Sub-trees are
+ * already transitively closed (their own imports merged during their
+ * parse), and re-merges are idempotent, so dependency chains converge.
+ */
+static void merge_globals_from(Node *sub_root, int line, int col, int width) {
+  for (Node *s = sub_root; s != NULL; s = s->right) {
+    if (s->type == NODE_VAR_DECL && s->var_decl.is_global) {
+      merge_one_global(sub_root, s->var_decl.name, line, col, width);
+    }
+  }
+}
+
 /**
  * @brief Finds a defined function by name
  * @param root List to search
@@ -1766,8 +1839,8 @@ static Node *parse_array_decl() {
 
 /**
  * @brief Deep-copies a right-linked node list for import merging
- * @param head First node of the list, may be NULL
- * @return Fresh list with no links into the original
+ * @param head First node of the list, may be NULL if empty
+ * @return Copied list, NULL if empty
  */
 static Node *clone_list(Node *head);
 
@@ -1816,6 +1889,7 @@ static Node *clone_node(Node *node) {
     copy->var_decl.name = malloc(len + 1);
     memcpy(copy->var_decl.name, node->var_decl.name, len);
     copy->var_decl.name[len] = '\0';
+    copy->var_decl.is_global = node->var_decl.is_global;
     copy->var_decl.value = clone_node(node->var_decl.value);
     break;
   case NODE_ARRAY_DECL:
@@ -2263,6 +2337,10 @@ static Node *parse_import() {
       emit_statement(clone_node(found_class));
       continue;
     }
+    if (find_global_in(sub_root, names[i]) != NULL) {
+      merge_one_global(sub_root, names[i], stmt_line, stmt_col, stmt_width);
+      continue;
+    }
     Node *owner = find_method_owner(sub_root, names[i]);
     if (owner != NULL) {
       char message[640];
@@ -2325,9 +2403,25 @@ static Node *parse_import() {
         check_duplicate_def(s->class_def.name, "Class", stmt_line, stmt_col,
                             stmt_width);
         emit_statement(clone_node(s));
+      } else if (s->type == NODE_VAR_DECL && s->var_decl.is_global) {
+        int listed = 0;
+        for (int i = 0; i < name_count; i++) {
+          if (strcmp(names[i], s->var_decl.name) == 0) {
+            listed = 1;
+            break;
+          }
+        }
+        if (listed) {
+          continue;
+        }
+        merge_one_global(sub_root, s->var_decl.name, stmt_line, stmt_col,
+                         stmt_width);
       }
     }
   }
+
+  /* Globals travel with their file, so merged functions keep resolving. */
+  merge_globals_from(sub_root, stmt_line, stmt_col, stmt_width);
 
   return NULL;
 }
@@ -3373,13 +3467,20 @@ Node *Parser(Token *tokens, const char *filename) {
         continue;
       }
       Node *dep = NULL;
+      Node *dep_root = NULL;
       for (int r = 0; r < import_done_count && dep == NULL; r++) {
         dep = find_function_in(import_roots[r], calls[k]->func_call.name);
+        if (dep != NULL) {
+          dep_root = import_roots[r];
+        }
       }
       if (dep == NULL) {
         continue;
       }
       emit_statement(clone_node(dep));
+      /* The dep's file globals come with it, so it keeps resolving. */
+      merge_globals_from(dep_root, calls[k]->line, calls[k]->col,
+                         calls[k]->width);
       progressed = 1;
     }
   }

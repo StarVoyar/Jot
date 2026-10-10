@@ -1,0 +1,10 @@
+global num counter = 41;
+
+fn public bump() -> num {
+  counter += 1;
+  return(counter);
+}
+
+fn public read() -> num {
+  return(counter);
+}

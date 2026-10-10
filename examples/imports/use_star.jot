@@ -1,0 +1,12 @@
+// Star imports carry globals too.
+from [state.jot] import [*];
+
+fn public main() {
+  print(bump());
+  print("\n");
+  print(counter);
+  print("\n");
+  return(0);
+}
+
+main();

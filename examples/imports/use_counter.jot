@@ -1,0 +1,12 @@
+// Globals import by name, like functions.
+from [state.jot] import [counter, read];
+
+fn public main() {
+  print(counter);
+  print("\n");
+  print(read());
+  print("\n");
+  return(0);
+}
+
+main();

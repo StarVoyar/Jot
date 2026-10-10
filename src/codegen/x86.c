@@ -2359,6 +2359,18 @@ void x86_emit_func(IrModule *m, IrFunc *f, int fi, int is_entry,
   fprintf(out, "  push rbp\n");
   fprintf(out, "  mov rbp, rsp\n");
   fprintf(out, "  sub rsp, %d\n", total);
+  if (total > 4096) {
+    /* Large single-frame jumps skip stack guard pages (instant segfault on
+       Windows); touch every page down so the OS commits them. Only rax and
+       r11 are used (both scratch) and no flags are live here. */
+    int seq = x_seq++;
+    fprintf(out, "  mov rax, rbp\n");
+    fprintf(out, "probe_loop%d:\n", seq);
+    fprintf(out, "  sub rax, 4096\n");
+    fprintf(out, "  mov r11, [rax]\n");
+    fprintf(out, "  cmp rax, rsp\n");
+    fprintf(out, "  ja probe_loop%d\n", seq);
+  }
   int k = 0;
   for (int r = 0; r < 16; r++) {
     if ((a->used_saved_gp & REG_BIT(r)) != 0) {
