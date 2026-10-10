@@ -18,7 +18,7 @@ static IrFunc *xf;
 static const RegAlloc *xa;
 
 /** Frame size for save-area offsets */
-static long x_frame;
+static int x_frame;
 
 /** Saved GP count for XMM save offsets */
 static int x_npush;
@@ -1653,8 +1653,8 @@ static void emit_restore(void) {
   for (int r = R_XMM0; r <= R_XMM15; r++) {
     if ((xa->used_saved_xmm & REG_BIT(r)) != 0) {
       xj++;
-      fprintf(xo, "  movups %s, [rbp - %ld]\n", reg_name(r),
-              x_frame + (long)x_npush * 8 + (long)xj * 16);
+      fprintf(xo, "  movups %s, [rbp - %d]\n", reg_name(r),
+              x_frame + x_npush * 8 + xj * 16);
     }
   }
   for (int r = 15; r >= 0; r--) {
@@ -1665,8 +1665,8 @@ static void emit_restore(void) {
           kk++;
         }
       }
-      fprintf(xo, "  mov %s, [rbp - %ld]\n", reg_name(r),
-              x_frame + (long)(kk + 1) * 8);
+      fprintf(xo, "  mov %s, [rbp - %d]\n", reg_name(r),
+              x_frame + (kk + 1) * 8);
     }
   }
 }
@@ -2048,12 +2048,12 @@ void x86_emit_func(IrModule *m, IrFunc *f, int fi, int is_entry,
   xa = a;
   int npush = pop_mask(a->used_saved_gp);
   int nxmm = pop_mask(a->used_saved_xmm);
-  long frame = (long)(f->nvars + f->ntemps) * 8 + 256;
+  int frame = (f->nvars + f->ntemps) * 8 + 256;
   if (frame < 2048) {
     frame = 2048;
   }
-  frame = (frame + 15) & ~15L;
-  long total = frame + (long)npush * 8 + (long)nxmm * 16;
+  frame = (frame + 15) & ~15;
+  int total = frame + npush * 8 + nxmm * 16;
   if (total % 16 != 0) {
     total += 8;
   }
@@ -2067,11 +2067,11 @@ void x86_emit_func(IrModule *m, IrFunc *f, int fi, int is_entry,
   }
   fprintf(out, "  push rbp\n");
   fprintf(out, "  mov rbp, rsp\n");
-  fprintf(out, "  sub rsp, %ld\n", total);
+  fprintf(out, "  sub rsp, %d\n", total);
   int k = 0;
   for (int r = 0; r < 16; r++) {
     if ((a->used_saved_gp & REG_BIT(r)) != 0) {
-      fprintf(out, "  mov [rbp - %ld], %s\n", frame + (long)(k + 1) * 8,
+      fprintf(out, "  mov [rbp - %d], %s\n", frame + (k + 1) * 8,
               reg_name(r));
       k++;
     }
@@ -2080,8 +2080,8 @@ void x86_emit_func(IrModule *m, IrFunc *f, int fi, int is_entry,
   for (int r = R_XMM0; r <= R_XMM15; r++) {
     if ((a->used_saved_xmm & REG_BIT(r)) != 0) {
       kx++;
-      fprintf(out, "  movups [rbp - %ld], %s\n",
-              frame + (long)npush * 8 + (long)kx * 16, reg_name(r));
+      fprintf(out, "  movups [rbp - %d], %s\n",
+              frame + npush * 8 + kx * 16, reg_name(r));
     }
   }
   fprintf(out, "  cmp rsp, [rel stack_floor]\n");

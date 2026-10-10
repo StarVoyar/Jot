@@ -59,10 +59,14 @@ static void register_loaded_file(const char *name, char *buffer) {
 Token *Lexer(FILE *file) {
   fseek(file, 0, SEEK_END);
   long length = ftell(file);
+  if (length < 0) {
+    length = 0;
+  }
   fseek(file, 0, SEEK_SET);
 
-  unsigned char *buffer = malloc(length + 1);
-  size_t bytes_read = fread(buffer, 1, length, file);
+  size_t size = (size_t)length;
+  unsigned char *buffer = malloc(size + 1);
+  size_t bytes_read = fread(buffer, 1, size, file);
   buffer[bytes_read] = '\0';
 
   fclose(file);
@@ -530,7 +534,7 @@ Token *lex_char(int *current_index) {
   token->col = token_col;
   (*current_index)++; /* skip opening ' */
 
-  long code = -1;
+  int code = -1;
   int invalid = 0;
   int raw_done = 0;
   char prefix[3];
@@ -604,7 +608,7 @@ Token *lex_char(int *current_index) {
 
   if (!invalid) {
     char digits[24];
-    int n = snprintf(digits, sizeof(digits), "%ld", code);
+    int n = snprintf(digits, sizeof(digits), "%d", code);
     token->value = malloc((size_t)n + 1);
     memcpy(token->value, digits, (size_t)n + 1);
     token->type = INT;

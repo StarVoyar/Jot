@@ -2032,7 +2032,7 @@ static Node *parse_import() {
   }
   current_token++;
 
-  FILE *target = fopen(path, "r");
+  FILE *target = fopen(path, "rb");
   if (!target) {
     char message[640];
     snprintf(message, sizeof(message), "Could not open file '%s'", path);

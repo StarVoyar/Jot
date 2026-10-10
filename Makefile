@@ -44,7 +44,7 @@ GENERATED_ASM = $(GENERATED_DIR)/$(ASM_BASE).asm
 GENERATED_OBJ = $(GENERATED_DIR)/$(ASM_BASE).obj
 GENERATED_EXE = $(GENERATED_DIR)/$(ASM_BASE)$(EXT)
 
-.PHONY: all clear clean build link run debug help
+.PHONY: all clear clean build link run debug help test
 
 help:
 	@echo all - clear, clean, build, link, debug, run, clean
@@ -53,6 +53,7 @@ help:
 	@echo debug - lex, parse and codegen $(INPUT_FILE) with tokens, AST and asm path printed
 	@echo run - compile $(INPUT_FILE) to asm, assemble, link and execute the program
 	@echo clean - delete $(BUILD_DIR)
+	@echo test - run examples at -O0/-O1/-O2 plus CLI checks (tests/run_win.ps1 or tests/run_unix.sh)
 	@echo help - show this message
 
 all: clear clean build link
@@ -86,6 +87,14 @@ run: $(TARGET) | $(GENERATED_DIR)
 	@$(NASM) -f $(NASM_FMT) $(GENERATED_ASM) -o $(GENERATED_OBJ) $(CLEAN_ON_FAIL)
 	@$(CC) $(GENERATED_OBJ) -o $(GENERATED_EXE) $(CLEAN_ON_FAIL)
 	-@$(RUN_EXE)
+
+ifeq ($(OS),Windows_NT)
+test: build link
+	@powershell -NoProfile -ExecutionPolicy Bypass -File tests/run_win.ps1
+else
+test: build link
+	@sh tests/run_unix.sh
+endif
 
 $(OBJS): | $(OBJ_DIRS)
 

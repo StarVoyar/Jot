@@ -21,4 +21,16 @@
 void GenerateAssembly(IrModule *mod, const char *source, const char *output,
                       const char *target);
 
+/**
+ * @brief Generates assembly into an already-open stream
+ * @param mod IR module (functions, globals, strings, vtables)
+ * @param source Source file path used in error messages
+ * @param out Open text stream receiving NASM assembly (LF line endings)
+ * @param target "win64", "elf64", or NULL for the host default
+ * @details Shared emission core behind GenerateAssembly; used for
+ * --emit-asm to stdout without touching the filesystem.
+ */
+void GenerateAssemblyFp(IrModule *mod, const char *source, FILE *out,
+                        const char *target);
+
 #endif

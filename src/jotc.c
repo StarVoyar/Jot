@@ -140,9 +140,10 @@ static char *default_out_path(const char *input) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 2 || strcmp(argv[1], "--help") == 0) {
+  if (argc < 2 || strcmp(argv[1], "--help") == 0 ||
+      strcmp(argv[1], "-h") == 0) {
     printf("Usage: %s <file.jot> [-o output] [--debug] [-O0|-O1|-O2] "
-           "[--emit-ir] [--target win64|elf64]\n",
+           "[--emit-ir] [--emit-asm] [--target win64|elf64]\n",
            argv[0]);
     printf("  -o output    Output file (e.g., main.exe, main.o, or main)\n");
     printf("  --debug      Print tokens, AST, and assembly path\n");
@@ -150,13 +151,15 @@ int main(int argc, char *argv[]) {
     printf("  -O1          Safe basic optimizations (default)\n");
     printf("  -O2          O1 plus local common-subexpression elimination\n");
     printf("  --emit-ir    Print the optimized IR and stop (no assembly)\n");
+    printf("  --emit-asm   Print the generated assembly and stop (no file)\n");
     printf("  --target     win64 (default on Windows) or elf64 (default "
            "elsewhere)\n");
-    return 1;
+    return 0;
   }
 
   int debug = 0;
   int emit_ir = 0;
+  int emit_asm = 0;
   OptLevel level = OPT_O1;
   const char *target = NULL;
   const char *out_arg = NULL;
@@ -165,6 +168,8 @@ int main(int argc, char *argv[]) {
       debug = 1;
     } else if (strcmp(argv[i], "--emit-ir") == 0) {
       emit_ir = 1;
+    } else if (strcmp(argv[i], "--emit-asm") == 0) {
+      emit_asm = 1;
     } else if (strcmp(argv[i], "--target") == 0) {
       if (i + 1 < argc) {
         target = argv[i + 1];
@@ -191,14 +196,14 @@ int main(int argc, char *argv[]) {
       out_arg = argv[i];
     } else {
       printf("Usage: %s <file.jot> [-o output] [--debug] [-O0|-O1|-O2] "
-             "[--emit-ir] [--target win64|elf64]\n",
+             "[--emit-ir] [--emit-asm] [--target win64|elf64]\n",
              argv[0]);
       return 1;
     }
   }
 
   FILE *file;
-  file = fopen(argv[1], "r");
+  file = fopen(argv[1], "rb");
   if (!file) {
     compiler_error("Could not open file '%s'\n", argv[1]);
     return 1;
@@ -238,6 +243,10 @@ int main(int argc, char *argv[]) {
     ir_dump(mod, stdout);
     return term_errors() > 0 ? 1 : 0;
   }
+  if (emit_asm) {
+    GenerateAssemblyFp(mod, argv[1], stdout, target);
+    return term_errors() > 0 ? 1 : 0;
+  }
 
   if (out_arg != NULL) {
     out_file = out_arg;
@@ -257,7 +266,7 @@ int main(int argc, char *argv[]) {
     out_file = default_out;
   }
 
-  FILE *check = fopen(out_file, "r");
+  FILE *check = fopen(out_file, "rb");
   if (check != NULL) {
     fclose(check);
     compiler_warning(

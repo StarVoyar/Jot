@@ -6,8 +6,8 @@
 #include "target.h"
 #include "x86.h"
 
-void GenerateAssembly(IrModule *mod, const char *source, const char *output,
-                      const char *target) {
+void GenerateAssemblyFp(IrModule *mod, const char *source, FILE *out,
+                        const char *target) {
   const Target *t = target_host();
   if (target != NULL) {
     t = target_by_name(target);
@@ -18,15 +18,6 @@ void GenerateAssembly(IrModule *mod, const char *source, const char *output,
       term_report(TERM_ERROR, source, 1, 1, 1, message);
       return;
     }
-  }
-
-  FILE *out = fopen(output, "w");
-  if (!out) {
-    char message[256];
-    snprintf(message, sizeof(message), "Could not open output file '%s'",
-             output);
-    term_report(TERM_ERROR, source, 1, 1, 1, message);
-    return;
   }
 
   fprintf(out, "global main\n");
@@ -62,6 +53,19 @@ void GenerateAssembly(IrModule *mod, const char *source, const char *output,
   }
 
   x86_emit_traps(t, out);
+}
 
+void GenerateAssembly(IrModule *mod, const char *source, const char *output,
+                      const char *target) {
+  FILE *out = fopen(output, "wb");
+  if (!out) {
+    char message[256];
+    snprintf(message, sizeof(message), "Could not open output file '%s'",
+             output);
+    term_report(TERM_ERROR, source, 1, 1, 1, message);
+    return;
+  }
+
+  GenerateAssemblyFp(mod, source, out, target);
   fclose(out);
 }
